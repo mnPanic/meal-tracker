@@ -1,8 +1,9 @@
 # meal-tracker
 
 Bot de Telegram para registrar comidas en un Google Sheet desde el celular. Mandás un mensaje
-("almorcé milanesa con ensalada en casa"), el bot lo estructura con OpenAI y escribe la fila en
-la planilla. Stateless, uso personal (~10 mensajes/día), corre gratis en Cloudflare Workers.
+de texto **o una nota de voz** ("almorcé milanesa con ensalada en casa"), el bot lo transcribe y
+estructura con OpenAI y escribe la fila en la planilla. Stateless, uso personal (~10 mensajes/día),
+corre gratis en Cloudflare Workers.
 
 ## Arquitectura
 
@@ -18,14 +19,16 @@ flowchart TD
       K -->|callback_query| CB[handleCallback]
     end
 
-    M -->|texto| EX[OpenAI: extract → JSON]
-    CB -->|re-extrae texto original| EX
+    M -->|voz/audio| TR[OpenAI: transcribe]
+    M -->|texto| EX
+    TR --> EX[OpenAI: extract → JSON]
+    CB -->|re-extrae texto/transcript| EX
     EX --> OK{completo y claro?}
     OK -->|no| ASK[pregunta aclaraciones · no guarda]
     OK -->|sí| RB[readDay hoy]
     RB --> COL{ya existe esa Comida?}
     COL -->|no| AP[append]
-    COL -->|sí| BTN[botones: Reemplazar / Agregar / Cancelar]
+    COL -->|sí| BTN[botones: Reemplazar / Cancelar]
     BTN -.callback.-> CB
 
     AP --> GS
@@ -37,6 +40,7 @@ flowchart TD
 
     AP --> R[✅ respuesta + botón Editar]
     EX -. OpenAI API .-> OAI[gpt-4o-mini]
+    TR -. OpenAI API .-> OAI
 ```
 
 ### Componentes
@@ -44,18 +48,23 @@ flowchart TD
 | Pieza | Archivo | Rol |
 |---|---|---|
 | Worker / webhook | `src/index.ts` | Recibe updates de Telegram, orquesta el flujo, responde. |
-| Extracción | `src/openai.ts` | `gpt-4o-mini` con structured outputs → `MealEntry`. |
+| Telegram | `src/telegram.ts` | Helpers de la Bot API (descarga de archivos para notas de voz). |
+| Transcripción + extracción | `src/openai.ts` | `gpt-4o-mini-transcribe` (voz→texto) + `gpt-4o-mini` structured outputs → `MealEntry`. |
 | Cliente del sheet | `src/sheets.ts` | Llama al Apps Script (read/append/overwrite + views), con token. |
 | Backend del sheet | `apps-script/Code.gs` | Web app que lee/escribe la planilla. Contrato en `apps-script/README.md`. |
 
 ## Flujo
 
-1. **Mensaje de texto** → `extract()` saca `comida / modo / calificacion / notas`.
+1. **Mensaje de texto o nota de voz** → la voz se transcribe con `transcribe()`, después
+   `extract()` saca `comida / modo / calificacion / notas`. Ambos caminos comparten el pipeline.
 2. **No infiere**: si falta algo o el modo es Delivery/Afuera sin lugar, **pregunta** y no guarda.
-3. **Read-before-write**: lee el día; si ya hay esa comida, ofrece **Reemplazar / Agregar / Cancelar**
-   (la fila viaja en el `callback_data`, stateless).
+3. **Read-before-write**: lee el día; si ya hay esa comida, ofrece **Reemplazar / Cancelar**
+   (la fila viaja en el `callback_data`, stateless). No se agregan duplicados de la misma comida.
 4. **Guarda** → `append`, responde `✅ Guardado` con botón **✏️ Editar**.
-5. **Editar**: tocás el botón → respondés con la corrección → `overwrite` de esa fila.
+5. **Editar**: tocás el botón → respondés (texto o voz) con la corrección → `overwrite` de esa fila.
+
+Las respuestas que vienen de una nota de voz incluyen el transcript en un footer (`🎤 …`) para
+debugging; ese mismo footer es lo que deja al flujo de colisión re-extraer de forma stateless.
 
 ### Reglas de dominio
 
@@ -63,11 +72,14 @@ flowchart TD
 - **`Score`** (columna E) es **fórmula del sheet**: `SWITCH(Modo) + SWITCH(Calificacion)`, rango 0–5.
   El bot nunca lo setea; el Apps Script reescribe la fórmula por fila (con `;`, locale español).
 - **`Notas`**: formato `{lugar|evento} - plato`. Casa = solo el plato; Delivery/Afuera = lugar + plato.
-- **`Fecha`**: hoy en `America/Argentina/Buenos_Aires`, valor de fecha real.
+- **`Fecha`**: hoy por defecto (`America/Argentina/Buenos_Aires`), pero si el mensaje menciona otra
+  fecha ("ayer", "el lunes", "12/06") OpenAI la resuelve y se usa esa. Se le pasa fecha+hora actual
+  al modelo para inferir la comida (horarios típicos: desayuno 06–11, almuerzo 12–15, etc.).
 
 ### Garantías del backend (Apps Script)
 
-- `append`/`overwrite` solo tocan filas **de hoy** (chequeo server-side con el reloj de BA).
+- `append`/`overwrite` solo tocan filas dentro de una **ventana reciente** (últimos 7 días, sin
+  futuro), con chequeo server-side usando el reloj de BA. `append` exige `fecha` (sin default).
 - Acceso "Anyone" + **secret token** en cada request (la URL puede ser pública, el token no).
 - Detalle completo del contrato: [`apps-script/README.md`](apps-script/README.md).
 
@@ -121,6 +133,4 @@ Los mensajes del bot incluyen detalle técnico (modo dev): operación + fila eje
 
 ## Pendientes / futuro
 
-- Notas de voz (transcripción `gpt-4o-mini-transcribe`) — el código existe en `openai.ts`, falta
-  cablear la descarga del audio en el webhook.
 - Recap automático al cerrar semana/mes (Cron Trigger + `readSemanal`/`readMensual`).

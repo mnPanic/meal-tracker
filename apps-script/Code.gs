@@ -7,13 +7,14 @@
 // INTERFACE (see apps-script/README.md for the full contract):
 //   read:      GET  ?fecha=YYYY-MM-DD (optional, default today)
 //                -> { ok, fecha, entries:[{row,comida,modo,calificacion,score,notas}] }
-//   append:    POST { action:"append", comida, modo, calificacion, notas }
-//                -> { ok, row }      (new row dated TODAY)
+//   append:    POST { action:"append", fecha:"YYYY-MM-DD", comida, modo, calificacion, notas }
+//                -> { ok, row }      (new row dated `fecha`; fecha is REQUIRED)
 //   overwrite: POST { action:"overwrite", row, comida, modo, calificacion, notas }
-//                -> { ok, row }      (only if that row's Fecha is today, else error)
+//                -> { ok, row }      (only if that row's Fecha is within the allowed window)
 //
-// Guarantees: append/overwrite only ever touch TODAY's rows; "today" is computed here in
-// Buenos Aires time, not trusted from the caller. Score is always rewritten as the formula.
+// Guarantees: append/overwrite only ever touch rows within a RECENT WINDOW (last 7 days, no
+// future), computed here in Buenos Aires time, not trusted from the caller. Score is always
+// rewritten as the formula.
 
 var SHEET_NAME = "Comidas";
 var TZ = "America/Argentina/Buenos_Aires";
@@ -46,6 +47,22 @@ function sheet_() {
 
 function todayStr_() {
   return Utilities.formatDate(new Date(), TZ, "yyyy-MM-dd");
+}
+
+var WRITE_WINDOW_DAYS = 7;
+
+// True if `dateStr` (yyyy-MM-dd) is within the allowed write window: from (today - 6) to today
+// inclusive, no future dates. Compared in BA time.
+function withinWindow_(dateStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr))) return false;
+  var today = todayStr_();
+  if (dateStr > today) return false; // no future
+  // Earliest allowed = today - (WRITE_WINDOW_DAYS - 1) days.
+  var parts = today.split("-");
+  var earliest = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  earliest.setDate(earliest.getDate() - (WRITE_WINDOW_DAYS - 1));
+  var earliestStr = Utilities.formatDate(earliest, TZ, "yyyy-MM-dd");
+  return dateStr >= earliestStr;
 }
 
 function fechaStr_(value) {
@@ -163,10 +180,14 @@ function doPost(e) {
     var data = JSON.parse(e.postData.contents);
     checkAuth_(data.token);
     var sheet = sheet_();
-    var today = todayStr_();
 
     if (data.action === "append") {
-      var parts = today.split("-"); // yyyy-MM-dd
+      if (!data.fecha) return json_({ ok: false, error: "falta fecha" });
+      var dateStr = String(data.fecha);
+      if (!withinWindow_(dateStr)) {
+        return json_({ ok: false, error: "fecha fuera de la ventana permitida (últimos 7 días): " + dateStr });
+      }
+      var parts = dateStr.split("-"); // yyyy-MM-dd
       var fecha = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
       sheet.appendRow([fecha, data.comida, data.modo, data.calificacion, "", data.notas]);
       var row = sheet.getLastRow();
@@ -177,10 +198,10 @@ function doPost(e) {
       var row = Number(data.row);
       if (!row || row < 2) return json_({ ok: false, error: "row inválida" });
       var existing = sheet.getRange(row, COL.FECHA).getValue();
-      if (fechaStr_(existing) !== today) {
-        return json_({ ok: false, error: "row not from today" });
+      if (!withinWindow_(fechaStr_(existing))) {
+        return json_({ ok: false, error: "row fuera de la ventana permitida (últimos 7 días)" });
       }
-      writeRow_(sheet, row, existing, data); // keep the existing (today's) date
+      writeRow_(sheet, row, existing, data); // keep the row's existing date
       return json_({ ok: true, row: row });
 
     } else {

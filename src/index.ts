@@ -1,12 +1,7 @@
 import { Hono } from "hono";
-import { extract, type MealEntry } from "./openai";
+import { extract, transcribe, type MealEntry } from "./openai";
 import { append, overwrite, readDay, type SheetClient } from "./sheets";
-
-interface DateParts {
-  y: number;
-  m: number;
-  d: number;
-}
+import { downloadFile, getFilePath } from "./telegram";
 
 type Bindings = {
   TELEGRAM_BOT_TOKEN: string;
@@ -18,21 +13,28 @@ type Bindings = {
 
 const TZ = "America/Argentina/Buenos_Aires";
 
-// Today's date in Buenos Aires time, as parts.
-function today(): DateParts {
-  const parts = new Intl.DateTimeFormat("en-CA", {
+// Today's date in Buenos Aires time as ISO YYYY-MM-DD (en-CA formats exactly that).
+function todayISO(): string {
+  return new Intl.DateTimeFormat("en-CA", {
     timeZone: TZ,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).formatToParts(new Date());
-  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
-  return { y: get("year"), m: get("month"), d: get("day") };
+  }).format(new Date());
 }
 
-function fmtDate({ y, m, d }: DateParts): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${y}/${pad(m)}/${pad(d)}`;
+// Human-readable current BA datetime with weekday, for the OpenAI context:
+// e.g. "2026-06-15 14:30 (domingo)".
+function nowBA(): string {
+  const date = todayISO();
+  const time = new Intl.DateTimeFormat("en-GB", {
+    timeZone: TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date());
+  const weekday = new Intl.DateTimeFormat("es-AR", { timeZone: TZ, weekday: "long" }).format(new Date());
+  return `${date} ${time} (${weekday})`;
 }
 
 function sheetClient(env: Bindings): SheetClient {
@@ -79,8 +81,8 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function summary(entry: MealEntry, fecha: string): string {
-  return `📅 ${fecha} · 🍽️ ${entry.comida} · 📍 ${entry.modo} · ⭐ ${entry.calificacion}\n📝 ${entry.notas}`;
+function summary(entry: MealEntry): string {
+  return `📅 ${entry.fecha} · 🍽️ ${entry.comida} · 📍 ${entry.modo} · ⭐ ${entry.calificacion}\n📝 ${entry.notas}`;
 }
 
 // Technical footer for dev use: which sheet op ran and on which row.
@@ -94,18 +96,40 @@ interface TgMessage {
   message_id: number;
   chat: { id: number };
   text?: string;
+  voice?: { file_id: string };
+  audio?: { file_id: string };
   reply_to_message?: { text?: string };
+}
+
+// Resolve the user's text from a message: plain text, or a transcribed voice/audio note.
+// `voice` is set only when the text came from transcription (so we can echo it for debugging).
+// Returns { text: null } if the message carries neither text nor audio.
+async function messageText(env: Bindings, msg: TgMessage): Promise<{ text: string | null; voice: boolean }> {
+  if (msg.text) return { text: msg.text, voice: false };
+  const fileId = msg.voice?.file_id ?? msg.audio?.file_id;
+  if (!fileId) return { text: null, voice: false };
+  const path = await getFilePath(env.TELEGRAM_BOT_TOKEN, fileId);
+  const audio = await downloadFile(env.TELEGRAM_BOT_TOKEN, path);
+  return { text: await transcribe(env.OPENAI_API_KEY, audio), voice: true };
+}
+
+// Dev footer echoing what we transcribed from a voice note (empty for plain text).
+function transcriptNote(userText: string, voice: boolean): string {
+  return voice ? `\n<code>🎤 ${escapeHtml(userText)}</code>` : "";
 }
 
 // Marker baked into the "editing" prompt so a reply can recover the row (stateless).
 const EDIT_RE = /Editando la fila (\d+)/;
+// Transcript echoed in the collision message (see transcriptNote); lets a callback re-extract
+// from a voice note that has no `reply_to_message.text` of its own (stateless).
+const TRANSCRIPT_RE = /🎤 (.+)$/;
 const editKeyboard = (row: number): InlineKeyboard => ({
   inline_keyboard: [[{ text: "✏️ Editar", callback_data: `ed:${row}` }]],
 });
 interface TgCallback {
   id: string;
   data?: string;
-  message: { message_id: number; chat: { id: number }; reply_to_message?: { text?: string } };
+  message: { message_id: number; chat: { id: number }; text?: string; reply_to_message?: { text?: string } };
 }
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -140,36 +164,38 @@ app.post("/webhook", async (c) => {
 
 async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   const token = env.TELEGRAM_BOT_TOKEN;
-  if (!msg.text) {
-    await reply(token, msg.chat.id, "Mandame un texto describiendo la comida 📝");
+  const { text: userText, voice } = await messageText(env, msg);
+  if (!userText) {
+    await reply(token, msg.chat.id, "Mandame un texto o una nota de voz describiendo la comida 📝🎤");
     return;
   }
+  const note = transcriptNote(userText, voice);
 
-  const fecha = today();
+  const now = nowBA();
 
   // Is this a reply to an "editing row N" prompt? → overwrite that row with the correction.
   const editMatch = msg.reply_to_message?.text?.match(EDIT_RE);
   if (editMatch) {
     const row = Number(editMatch[1]);
-    const corrected = await extract(env.OPENAI_API_KEY, msg.text, fmtDate(fecha));
+    const corrected = await extract(env.OPENAI_API_KEY, userText, now);
     await overwrite(sheetClient(env), row, corrected);
     await reply(
       token,
       msg.chat.id,
-      `✏️ <b>Editado</b>\n${summary(corrected, fmtDate(fecha))}${tech("overwrite", row)}`,
+      `✏️ <b>Editado</b>\n${summary(corrected)}${tech("overwrite", row)}${note}`,
       { keyboard: editKeyboard(row) },
     );
     return;
   }
 
-  const entry = await extract(env.OPENAI_API_KEY, msg.text, fmtDate(fecha));
+  const entry = await extract(env.OPENAI_API_KEY, userText, now);
 
   // Incomplete or ambiguous → ask, do NOT save.
   if (entry.aclaraciones.length > 0 || !entry.comida || !entry.modo || !entry.calificacion) {
     const v = (x: string) => (x ? x : "❓ no está claro");
     const lines = [
       "Esto entendí, pero falta confirmar algo:",
-      `📅 <b>Fecha:</b> ${fmtDate(fecha)}`,
+      `📅 <b>Fecha:</b> ${entry.fecha}`,
       `🍽️ <b>Comida:</b> ${v(entry.comida)}`,
       `📍 <b>Modo:</b> ${v(entry.modo)}`,
       `⭐ <b>Calificación:</b> ${v(entry.calificacion)}`,
@@ -178,12 +204,12 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
       "❓ <b>Para confirmar:</b>",
       ...entry.aclaraciones.map((a) => `• ${a}`),
     ];
-    await reply(token, msg.chat.id, lines.join("\n"));
+    await reply(token, msg.chat.id, lines.join("\n") + note);
     return;
   }
 
-  // Read-before-write: is there already an entry for this Comida today?
-  const existing = (await readDay(sheetClient(env))).find((e) => e.comida === entry.comida);
+  // Read-before-write: is there already an entry for this Comida on the target date?
+  const existing = (await readDay(sheetClient(env), entry.fecha)).find((e) => e.comida === entry.comida);
 
   if (existing) {
     // Don't decide silently — ask. Row number rides in the callback_data (stateless).
@@ -191,23 +217,22 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
       inline_keyboard: [
         [
           { text: "✏️ Reemplazar", callback_data: `ow:${existing.row}` },
-          { text: "➕ Agregar igual", callback_data: "ap" },
+          { text: "✖️ Cancelar", callback_data: "no" },
         ],
-        [{ text: "✖️ Cancelar", callback_data: "no" }],
       ],
     };
     await reply(
       token,
       msg.chat.id,
       [
-        `⚠️ Ya tenías <b>${entry.comida}</b> hoy:`,
+        `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}:`,
         `   ${existing.notas}`,
         "",
         "Lo nuevo sería:",
         `   ${entry.notas} (${entry.modo} · ${entry.calificacion})`,
         "",
         "¿Qué hago?",
-      ].join("\n"),
+      ].join("\n") + note,
       { keyboard, replyTo: msg.message_id }, // reply_to lets the callback re-read this text
     );
     return;
@@ -215,7 +240,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
 
   // No collision → save directly.
   const row = await append(sheetClient(env), entry);
-  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry, fmtDate(fecha))}${tech("append", row)}`, {
+  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${tech("append", row)}${note}`, {
     keyboard: editKeyboard(row),
   });
 }
@@ -245,14 +270,16 @@ async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {
   }
 
   // Re-extract from the original message the buttons replied to (stateless: no stored draft).
-  const origText = cq.message.reply_to_message?.text;
+  // For text the original message carries it; for a voice note it has no text, so fall back to
+  // the transcript echoed in this collision message's own footer (🎤 ...).
+  const origText =
+    cq.message.reply_to_message?.text || cq.message.text?.match(TRANSCRIPT_RE)?.[1];
   if (!origText) {
     await editText(token, chatId, messageId, "❌ Perdí el mensaje original, reenvialo por favor.");
     return;
   }
 
-  const fecha = today();
-  const entry = await extract(env.OPENAI_API_KEY, origText, fmtDate(fecha));
+  const entry = await extract(env.OPENAI_API_KEY, origText, nowBA());
 
   if (cq.data?.startsWith("ow:")) {
     const row = Number(cq.data.slice(3));
@@ -261,15 +288,7 @@ async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {
       token,
       chatId,
       messageId,
-      `✏️ <b>Reemplazado</b>\n${summary(entry, fmtDate(fecha))}${tech("overwrite", row)}`,
-    );
-  } else if (cq.data === "ap") {
-    const row = await append(sheetClient(env), entry);
-    await editText(
-      token,
-      chatId,
-      messageId,
-      `➕ <b>Agregado</b>\n${summary(entry, fmtDate(fecha))}${tech("append", row)}`,
+      `✏️ <b>Reemplazado</b>\n${summary(entry)}${tech("overwrite", row)}`,
     );
   }
 }

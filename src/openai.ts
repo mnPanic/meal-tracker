@@ -1,7 +1,7 @@
 // OpenAI transcription + structured extraction.
 
 export interface MealEntry {
-  fecha: string; // DD/MM/YY
+  fecha: string; // YYYY-MM-DD (resuelta: hoy por defecto, o la fecha relativa/explícita mencionada)
   comida: string; // Desayuno|Almuerzo|Merienda|Cena, o "" si no está claro
   modo: string; // Casa|Delivery|Afuera, o "" si no está claro
   calificacion: string; // OK|Mid|Bad, o "" si no está claro
@@ -28,6 +28,17 @@ export async function transcribe(apiKey: string, audio: ArrayBuffer): Promise<st
 }
 
 const SYSTEM_PROMPT = `Extraés registros de comidas a partir de un mensaje en español argentino.
+
+FECHA: el usuario te da la fecha y hora actual (zona Argentina). Por defecto la comida es de HOY.
+Pero si el mensaje menciona otra fecha, RESOLVELA relativa al ahora y usá esa:
+- "ayer" = el día anterior; "anteayer" = dos días antes; "el lunes/martes..." = ese día de la
+  semana más reciente ya pasado; "el 12" o "12/06" = esa fecha del mes actual.
+Devolvé "fecha" siempre en formato YYYY-MM-DD. Si no se menciona ninguna fecha, usá hoy.
+
+HORA: usá la hora actual como pista para inferir cuál de las 4 comidas es cuando el mensaje no lo
+dice explícitamente. Horarios típicos en Argentina: Desayuno 06–11, Almuerzo 12–15,
+Merienda 16–19, Cena 20–24. Ojo: si el mensaje dice "ayer" u otra fecha, la hora actual ya no es
+buena pista para la comida de ESE día → en ese caso, si la comida no está clara, preguntala.
 
 Campos:
 - comida: cuál de las 4 comidas del día (Desayuno | Almuerzo | Merienda | Cena).
@@ -59,7 +70,7 @@ const SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    fecha: { type: "string", description: "fecha de hoy en formato DD/MM/YY" },
+    fecha: { type: "string", description: "fecha de la comida en formato YYYY-MM-DD (hoy por defecto, o la mencionada)" },
     comida: { type: "string", description: "Desayuno|Almuerzo|Merienda|Cena, o \"\" si no está claro" },
     modo: { type: "string", description: "Casa|Delivery|Afuera, o \"\" si no está claro" },
     calificacion: { type: "string", description: "OK|Mid|Bad (calidad nutricional), o \"\" si no está claro" },
@@ -73,7 +84,8 @@ const SCHEMA = {
   required: ["fecha", "comida", "modo", "calificacion", "notas", "aclaraciones"],
 } as const;
 
-export async function extract(apiKey: string, transcript: string, todayDDMMYY: string): Promise<MealEntry> {
+// `now` is a human-readable BA datetime with weekday, e.g. "2026-06-15 14:30 (domingo)".
+export async function extract(apiKey: string, transcript: string, now: string): Promise<MealEntry> {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
@@ -81,7 +93,7 @@ export async function extract(apiKey: string, transcript: string, todayDDMMYY: s
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: `Today is ${todayDDMMYY}.\nTranscript: ${transcript}` },
+        { role: "user", content: `Ahora es ${now} (Argentina).\nMensaje: ${transcript}` },
       ],
       response_format: {
         type: "json_schema",

@@ -38,13 +38,16 @@ Read-only. `row` is the sheet row number, used to target an `overwrite`.
 ## append — `POST {action:"append", ...}`
 
 ```
-POST <url>   body: { "action":"append",
+POST <url>   body: { "action":"append", "fecha":"2026-06-15",
                      "comida":"Cena", "modo":"Casa",
                      "calificacion":"OK", "notas":"tofu salteado" }
 → { "ok": true, "row": 413 }
+→ { "ok": false, "error":"falta fecha" }                                 // fecha is required
+→ { "ok": false, "error":"fecha fuera de la ventana permitida ..." }     // outside last 7 days
 ```
 
-Adds a **new** row dated **today**. Score is written as the per-row formula. Never overwrites.
+Adds a **new** row dated **`fecha`** (REQUIRED, no default). Score is written as the per-row
+formula. Never overwrites. `fecha` must fall within the allowed window (last 7 days, no future).
 
 ## overwrite — `POST {action:"overwrite", row, ...}`
 
@@ -52,13 +55,13 @@ Adds a **new** row dated **today**. Score is written as the per-row formula. Nev
 POST <url>   body: { "action":"overwrite", "row":413,
                      "comida":"Cena", "modo":"Delivery",
                      "calificacion":"Mid", "notas":"pedí sushi" }
-→ { "ok": true, "row": 413 }          // success
-→ { "ok": false, "error":"row not from today" }   // row belongs to another day
+→ { "ok": true, "row": 413 }                                          // success
+→ { "ok": false, "error":"row fuera de la ventana permitida ..." }    // row too old / future
 ```
 
-Updates fields + Score formula in `row`, **only if that row's Fecha is today**. The date itself
-is preserved (not changed). This is the only way to change existing data, and it is sandboxed to
-the current day so a stale/wrong row number cannot corrupt history.
+Updates fields + Score formula in `row`, **only if that row's Fecha is within the allowed window**
+(last 7 days). The date itself is preserved (not changed). This is the only way to change existing
+data, and it is sandboxed to the recent window so a stale/wrong row number cannot corrupt history.
 
 ## read views — `GET ?view=diario|semanal|mensual` (read-only)
 
@@ -86,8 +89,8 @@ side-by-side tables). `score`/`promedio` are the sheet's computed averages — r
 
 ## Guarantees
 
-- append and overwrite **only ever affect today's rows**.
-- "today" is computed inside the script in `America/Argentina/Buenos_Aires` — not trusted from the caller.
+- append and overwrite **only ever affect rows within a recent window** (last 7 days, no future).
+- The window is computed inside the script in `America/Argentina/Buenos_Aires` — not trusted from the caller.
 - append never overwrites; overwrite never appends.
 - Score is always (re)written by the script; callers never set it.
 - Writes are serialized with a script lock.

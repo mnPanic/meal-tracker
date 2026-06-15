@@ -1,7 +1,7 @@
 // Client for the Apps Script web app. See apps-script/README.md for the contract.
 // Ops: readDay/readDiario/readSemanal/readMensual (GET), append/overwrite (POST).
 // Every request carries the shared secret token; the script rejects anything without it.
-// Writes are sandboxed server-side to today's rows.
+// Writes are sandboxed server-side to a recent window (last 7 days, no future).
 
 import type { MealEntry } from "./openai";
 
@@ -51,14 +51,15 @@ export async function readDay(c: SheetClient, fecha?: string): Promise<SheetEntr
   return j.entries ?? [];
 }
 
-// Add a new row dated today. Returns the new row number.
+// Add a new row dated entry.fecha (YYYY-MM-DD). Returns the new row number.
+// The backend rejects dates outside the allowed window (last 7 days, no future).
 export async function append(c: SheetClient, entry: MealEntry): Promise<number> {
-  const j = await post(c, { action: "append", ...fields(entry) });
+  const j = await post(c, { action: "append", fecha: entry.fecha, ...fields(entry) });
   if (!j.ok) throw new Error(`sheets append failed: ${j.error}`);
   return j.row ?? 0;
 }
 
-// Overwrite an existing row (only succeeds if that row is from today).
+// Overwrite an existing row (only succeeds if that row is within the allowed window).
 export async function overwrite(c: SheetClient, row: number, entry: MealEntry): Promise<number> {
   const j = await post(c, { action: "overwrite", row, ...fields(entry) });
   if (!j.ok) throw new Error(`sheets overwrite failed: ${j.error}`);
