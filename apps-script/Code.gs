@@ -57,8 +57,9 @@ function fechaStr_(value) {
 }
 
 function scoreFormula_(row) {
-  return '=SWITCH(C' + row + ',"Casa",2,"Delivery",1,"Afuera",0)' +
-         '+SWITCH(D' + row + ',"OK",3,"Mid",1,"Bad",0)';
+  // Sheet locale is Spanish → argument separator is ";", not ",".
+  return '=SWITCH(C' + row + ';"Casa";2;"Delivery";1;"Afuera";0)' +
+         '+SWITCH(D' + row + ';"OK";3;"Mid";1;"Bad";0)';
 }
 
 // Write fields + Score formula into an existing row number.
