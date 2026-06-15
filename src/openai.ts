@@ -47,7 +47,8 @@ Campos:
   NO cuánto le gustó a la persona. Una pizza o fritura rica es nutricionalmente Bad; una comida
   balanceada con verduras y proteína es OK; algo intermedio es Mid. Juzgá por el alimento en sí,
   ignorando si dijo que estaba rico o no.
-- notas: descripción de la comida, en estilo telegráfico (sin verbos como "comí/cené"), conciso.
+- notas: descripción de la comida en estilo telegráfico (sin verbos como "comí/cené"), conciso
+  pero sin dejar detalles afuera (no descartes ingredientes ni cantidades que se mencionen).
 
 FORMATO DE NOTAS: "{lugar|evento} - plato". Es decir, si hay un lugar o un evento, va como prefijo
 seguido de " - " y después el plato. Reglas:
@@ -56,7 +57,7 @@ seguido de " - " y después el plato. Reglas:
   (ej: "Cumple de Nico - picada y pizza").
 - modo Delivery o Afuera: SE ESPERA el nombre del lugar/local como prefijo
   (ej: "Audaz - milanesa de pollo con ensalada", "La Cabrera - mila napo con papas", "Daiki - sushi").
-- Estilo: español argentino, breve (~3-6 palabras el plato), items separados por coma o "con".
+- Estilo: español argentino, conciso pero completo, items separados por coma o "con".
 
 REGLA IMPORTANTE: NO inventes ni infieras datos. Si un campo no está claro o no se menciona,
 dejalo como cadena vacía "" y agregá una entrada en "aclaraciones" explicándole al usuario qué
