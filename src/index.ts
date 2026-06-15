@@ -182,7 +182,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     await reply(
       token,
       msg.chat.id,
-      `✏️ <b>Editado</b>\n${summary(corrected)}${tech("overwrite", row)}${note}`,
+      `✏️ <b>Editado</b>\n${summary(corrected)}${note}${tech("overwrite", row)}`,
       { keyboard: editKeyboard(row) },
     );
     return;
@@ -240,7 +240,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
 
   // No collision → save directly.
   const row = await append(sheetClient(env), entry);
-  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${tech("append", row)}${note}`, {
+  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${note}${tech("append", row)}`, {
     keyboard: editKeyboard(row),
   });
 }

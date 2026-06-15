@@ -49,6 +49,7 @@ Campos:
   ignorando si dijo que estaba rico o no.
 - notas: descripción de la comida en estilo telegráfico (sin verbos como "comí/cené"), conciso
   pero sin dejar detalles afuera (no descartes ingredientes ni cantidades que se mencionen).
+  No repitas el modo (Casa/Delivery/Afuera) en las notas, ya va en su propio campo.
 
 FORMATO DE NOTAS: "{lugar|evento} - plato". Es decir, si hay un lugar o un evento, va como prefijo
 seguido de " - " y después el plato. Reglas:
