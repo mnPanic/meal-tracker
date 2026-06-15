@@ -1,0 +1,7 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit the real one.
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_WEBHOOK_SECRET=
+OPENAI_API_KEY=
+SHEETS_WEBAPP_URL=
+SHEETS_API_SECRET=
+ALLOWED_CHAT_ID=
