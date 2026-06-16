@@ -35,10 +35,13 @@ Pero si el mensaje menciona otra fecha, RESOLVELA relativa al ahora y usá esa:
   semana más reciente ya pasado; "el 12" o "12/06" = esa fecha del mes actual.
 Devolvé "fecha" siempre en formato YYYY-MM-DD. Si no se menciona ninguna fecha, usá hoy.
 
-HORA: usá la hora actual como pista para inferir cuál de las 4 comidas es cuando el mensaje no lo
-dice explícitamente. Horarios típicos en Argentina: Desayuno 06–11, Almuerzo 12–15,
-Merienda 16–19, Cena 20–24. Ojo: si el mensaje dice "ayer" u otra fecha, la hora actual ya no es
-buena pista para la comida de ESE día → en ese caso, si la comida no está clara, preguntala.
+HORA: junto al ahora recibís una "comida probable" (comida + fecha) calculada
+automáticamente a partir de la hora actual de Argentina (tomando la comida anterior más
+cercana; en la madrugada eso es la Cena del día anterior). Usá ESA comida y ESA fecha por
+defecto cuando el mensaje no diga otra cosa. Apartate del hint si el mensaje menciona o
+implica explícitamente otra comida o fecha (gana lo explícito; resolvé las fechas relativas
+como se indica arriba). Si el mensaje es de otra fecha distinta a la del hint y la comida no
+está clara, ignorá el hint y preguntala.
 
 Campos:
 - comida: cuál de las 4 comidas del día (Desayuno | Almuerzo | Merienda | Cena).
@@ -87,7 +90,13 @@ const SCHEMA = {
 } as const;
 
 // `now` is a human-readable BA datetime with weekday, e.g. "2026-06-15 14:30 (domingo)".
-export async function extract(apiKey: string, transcript: string, now: string): Promise<MealEntry> {
+// `hint` is the deterministic meal+date guessed from the current BA hour.
+export async function extract(
+  apiKey: string,
+  transcript: string,
+  now: string,
+  hint: { fecha: string; comida: string },
+): Promise<MealEntry> {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
@@ -95,7 +104,10 @@ export async function extract(apiKey: string, transcript: string, now: string): 
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: `Ahora es ${now} (Argentina).\nMensaje: ${transcript}` },
+        {
+          role: "user",
+          content: `Ahora es ${now} (Argentina).\nPor la hora, lo más probable es la ${hint.comida} del ${hint.fecha}.\nMensaje: ${transcript}`,
+        },
       ],
       response_format: {
         type: "json_schema",

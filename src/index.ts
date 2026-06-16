@@ -47,6 +47,24 @@ function nowBA(): string {
   return `${date} ${time} (${weekday})`;
 }
 
+// "La anterior más cercana" según la hora de Buenos Aires. Es un HINT para el agente
+// (devuelve fecha + comida); antes de las 06 => Cena del día anterior.
+function comidaHint(): { fecha: string; comida: string } {
+  const h = Number(
+    new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", hour12: false }).format(new Date()),
+  );
+  if (h < 6) {
+    const [y, m, d] = todayISO().split("-").map(Number);
+    const prev = new Date(Date.UTC(y, m - 1, d - 1));
+    return { fecha: prev.toISOString().slice(0, 10), comida: "Cena" };
+  }
+  let comida = "Desayuno";
+  if (h >= 19) comida = "Cena";
+  else if (h >= 16) comida = "Merienda";
+  else if (h >= 12) comida = "Almuerzo";
+  return { fecha: todayISO(), comida };
+}
+
 function sheetClient(env: Bindings): SheetClient {
   return { url: env.SHEETS_WEBAPP_URL, secret: env.SHEETS_API_SECRET };
 }
@@ -238,12 +256,13 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   const note = transcriptNote(userText, voice);
 
   const now = nowBA();
+  const hint = comidaHint();
 
   // Is this a reply to an "editing row N" prompt? → overwrite that row with the correction.
   const editMatch = msg.reply_to_message?.text?.match(EDIT_RE);
   if (editMatch) {
     const row = Number(editMatch[1]);
-    const corrected = await extract(env.OPENAI_API_KEY, userText, now);
+    const corrected = await extract(env.OPENAI_API_KEY, userText, now, hint);
     await overwrite(sheetClient(env), row, corrected);
     await reply(
       token,
@@ -254,7 +273,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     return;
   }
 
-  const entry = await extract(env.OPENAI_API_KEY, userText, now);
+  const entry = await extract(env.OPENAI_API_KEY, userText, now, hint);
 
   // Incomplete or ambiguous → ask, do NOT save.
   if (entry.aclaraciones.length > 0 || !entry.comida || !entry.modo || !entry.calificacion) {
@@ -350,7 +369,7 @@ async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {
     return;
   }
 
-  const entry = await extract(env.OPENAI_API_KEY, origText, nowBA());
+  const entry = await extract(env.OPENAI_API_KEY, origText, nowBA(), comidaHint());
 
   if (cq.data?.startsWith("ow:")) {
     const row = Number(cq.data.slice(3));
