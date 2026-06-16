@@ -1,6 +1,16 @@
 import { Hono } from "hono";
 import { extract, transcribe, type MealEntry } from "./openai";
-import { append, overwrite, readDay, type SheetClient } from "./sheets";
+import {
+  append,
+  overwrite,
+  readDay,
+  readDiario,
+  readMensual,
+  readSemanal,
+  type DiarioRow,
+  type PeriodoRow,
+  type SheetClient,
+} from "./sheets";
 import { downloadFile, getFilePath } from "./telegram";
 
 type Bindings = {
@@ -88,6 +98,62 @@ function summary(entry: MealEntry): string {
 // Technical footer for dev use: which sheet op ran and on which row.
 function tech(op: string, row: number): string {
   return `\n<code>${op} · fila ${row}</code>`;
+}
+
+// --- Cierres de ciclo (recaps) ---
+// La Cena es el último momento del día. Al guardarla (append), si cierra día/semana/mes,
+// le mandamos el resumen de ese período usando las views del Apps Script.
+
+function fmtDiario(r: DiarioRow): string {
+  const line = (emoji: string, label: string, val: string) => `${emoji} <b>${label}:</b> ${val || "—"}`;
+  const parts = [
+    `🌙 <b>Cierre del día ${r.fecha}</b>`,
+    line("☀️", "Desayuno", r.desayuno),
+    line("🍽️", "Almuerzo", r.almuerzo),
+    line("🧉", "Merienda", r.merienda),
+    line("🌆", "Cena", r.cena),
+    `⭐ <b>Score del día:</b> ${r.score}`,
+  ];
+  if (r.evento) parts.push(`🎉 ${r.evento}`);
+  return parts.join("\n");
+}
+
+function fmtPeriodo(titulo: string, emoji: string, r: PeriodoRow): string {
+  const parts = [`${emoji} <b>Cierre ${titulo}: ${r.label}</b>`, `⭐ <b>Promedio:</b> ${r.promedio}`];
+  if (r.eventos) parts.push(`🎉 ${r.eventos}`);
+  return parts.join("\n");
+}
+
+// Parse a YYYY-MM-DD into UTC-safe parts (no timezone drift for weekday/last-day math).
+function parseISO(iso: string): { y: number; m: number; d: number } {
+  const [y, m, d] = iso.split("-").map(Number);
+  return { y, m, d };
+}
+
+// After appending a Cena, send the recaps for the cycles it closes (day, + week if Sunday,
+// + month if last day of the month). Based on the meal's fecha, so a late "ayer" cena still works.
+async function sendCierres(env: Bindings, chatId: number, fecha: string): Promise<void> {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  const client = sheetClient(env);
+
+  // Día: buscar la fila de esa fecha en la view diario (ventana corta por las dudas).
+  const dia = (await readDiario(client, 7)).find((r) => r.fecha === fecha);
+  if (dia) await reply(token, chatId, fmtDiario(dia));
+
+  const { y, m, d } = parseISO(fecha);
+
+  // Semana: si la cena es domingo (getUTCDay() === 0), cierra la semana.
+  if (new Date(Date.UTC(y, m - 1, d)).getUTCDay() === 0) {
+    const [sem] = await readSemanal(client, 1);
+    if (sem) await reply(token, chatId, fmtPeriodo("semana", "📊", sem));
+  }
+
+  // Mes: si es el último día del mes, cierra el mes. Día 0 del mes siguiente = último del actual.
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  if (d === lastDay) {
+    const [mes] = await readMensual(client, 1);
+    if (mes) await reply(token, chatId, fmtPeriodo("mes", "📈", mes));
+  }
 }
 
 // --- Types for the incoming update ---
@@ -243,6 +309,11 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${note}${tech("append", row)}`, {
     keyboard: editKeyboard(row),
   });
+
+  // Si la Cena cierra el día (y quizá semana/mes), mandar los recaps.
+  if (entry.comida === "Cena") {
+    await sendCierres(env, msg.chat.id, entry.fecha);
+  }
 }
 
 async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {

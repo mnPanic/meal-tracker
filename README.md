@@ -62,6 +62,9 @@ flowchart TD
    (la fila viaja en el `callback_data`, stateless). No se agregan duplicados de la misma comida.
 4. **Guarda** → `append`, responde `✅ Guardado` con botón **✏️ Editar**.
 5. **Editar**: tocás el botón → respondés (texto o voz) con la corrección → `overwrite` de esa fila.
+6. **Cierres de ciclo**: la Cena es el último momento del día. Al hacer `append` de una Cena, el bot
+   manda el **recap del día** (`readDiario`); si esa fecha es domingo, también el **semanal**
+   (`readSemanal`); si es el último día del mes, el **mensual** (`readMensual`). Event-driven, sin cron.
 
 Las respuestas que vienen de una nota de voz incluyen el transcript en un footer (`🎤 …`) para
 debugging; ese mismo footer es lo que deja al flujo de colisión re-extraer de forma stateless.
@@ -133,4 +136,4 @@ Los mensajes del bot incluyen detalle técnico (modo dev): operación + fila eje
 
 ## Pendientes / futuro
 
-- Recap automático al cerrar semana/mes (Cron Trigger + `readSemanal`/`readMensual`).
+- (sin pendientes grandes por ahora)
