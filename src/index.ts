@@ -47,9 +47,14 @@ function nowBA(): string {
   return `${date} ${time} (${weekday})`;
 }
 
-// "La anterior más cercana" según la hora de Buenos Aires. Es un HINT para el agente
-// (devuelve fecha + comida); antes de las 06 => Cena del día anterior.
-function comidaHint(): { fecha: string; comida: string } {
+// HINT (fecha + comida) para el agente, según la hora de Buenos Aires.
+// Antes de las 06 => Cena del día anterior. De día, la hora da un "techo" (la comida más
+// tardía plausible) y, como las comidas se cargan en orden, el hint es la PRIMERA comida
+// faltante hoy hasta ese techo (ej: 18h con Almuerzo sin cargar => Almuerzo, no Merienda).
+const ORDEN: (keyof DiarioRow["notas"])[] = ["desayuno", "almuerzo", "merienda", "cena"];
+const CAP = (label: string) => label.charAt(0).toUpperCase() + label.slice(1);
+
+function comidaHint(rows: DiarioRow[]): { fecha: string; comida: string } {
   const h = Number(
     new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", hour12: false }).format(new Date()),
   );
@@ -58,11 +63,16 @@ function comidaHint(): { fecha: string; comida: string } {
     const prev = new Date(Date.UTC(y, m - 1, d - 1));
     return { fecha: prev.toISOString().slice(0, 10), comida: "Cena" };
   }
-  let comida = "Desayuno";
-  if (h >= 19) comida = "Cena";
-  else if (h >= 16) comida = "Merienda";
-  else if (h >= 12) comida = "Almuerzo";
-  return { fecha: todayISO(), comida };
+  const fecha = todayISO();
+  let techo = 0; // Desayuno
+  if (h >= 19) techo = 3;
+  else if (h >= 16) techo = 2;
+  else if (h >= 12) techo = 1;
+  const hoy = rows.find((r) => r.fecha === fecha)?.notas;
+  // Primera comida OBLIGATORIA faltante hasta el techo (la merienda, índice 2, es opcional y
+  // no cuenta como faltante). Si no falta ninguna, usar la comida del techo.
+  const idx = ORDEN.slice(0, techo + 1).findIndex((k, i) => i !== 2 && !(hoy && hoy[k]));
+  return { fecha, comida: CAP(ORDEN[idx === -1 ? techo : idx]) };
 }
 
 // Compact block of recent meals (one line per day) to give the model context.
@@ -275,8 +285,9 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   const note = transcriptNote(userText, voice);
 
   const now = nowBA();
-  const hint = comidaHint();
-  const recientes = formatRecientes(await readDiario(sheetClient(env), 2));
+  const recientesRows = await readDiario(sheetClient(env), 2);
+  const hint = comidaHint(recientesRows);
+  const recientes = formatRecientes(recientesRows);
 
   // Is this a reply to an "editing row N" prompt? → overwrite that row with the correction.
   const editMatch = msg.reply_to_message?.text?.match(EDIT_RE);
@@ -389,7 +400,14 @@ async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {
     return;
   }
 
-  const entry = await extract(env.OPENAI_API_KEY, origText, nowBA(), comidaHint());
+  const recientesRows = await readDiario(sheetClient(env), 2);
+  const entry = await extract(
+    env.OPENAI_API_KEY,
+    origText,
+    nowBA(),
+    comidaHint(recientesRows),
+    formatRecientes(recientesRows),
+  );
 
   if (cq.data?.startsWith("ow:")) {
     const row = Number(cq.data.slice(3));
