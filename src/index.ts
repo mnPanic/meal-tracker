@@ -231,6 +231,13 @@ function transcriptNote(userText: string, voice: boolean): string {
   return voice ? `\n<code>🎤 ${escapeHtml(userText)}</code>` : "";
 }
 
+// Dev footer showing the context fed to the model (hint + recent meals), for debugging.
+function ctxNote(hint: { fecha: string; comida: string }, recientes: string): string {
+  const lines = [`🧩 hint: ${hint.comida} ${hint.fecha}`];
+  if (recientes) lines.push("recientes:", recientes);
+  return `\n<code>${escapeHtml(lines.join("\n"))}</code>`;
+}
+
 // Marker baked into the "editing" prompt so a reply can recover the row (stateless).
 const EDIT_RE = /Editando la fila (\d+)/;
 // Transcript echoed in the collision message (see transcriptNote); lets a callback re-extract
@@ -288,6 +295,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   const recientesRows = await readDiario(sheetClient(env), 2);
   const hint = comidaHint(recientesRows);
   const recientes = formatRecientes(recientesRows);
+  const ctx = ctxNote(hint, recientes);
 
   // Is this a reply to an "editing row N" prompt? → overwrite that row with the correction.
   const editMatch = msg.reply_to_message?.text?.match(EDIT_RE);
@@ -298,7 +306,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     await reply(
       token,
       msg.chat.id,
-      `✏️ <b>Editado</b>\n${summary(corrected)}${note}${tech("overwrite", row)}`,
+      `✏️ <b>Editado</b>\n${summary(corrected)}${note}${ctx}${tech("overwrite", row)}`,
       { keyboard: editKeyboard(row) },
     );
     return;
@@ -320,7 +328,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
       "❓ <b>Para confirmar:</b>",
       ...entry.aclaraciones.map((a) => `• ${a}`),
     ];
-    await reply(token, msg.chat.id, lines.join("\n") + note);
+    await reply(token, msg.chat.id, lines.join("\n") + note + ctx);
     return;
   }
 
@@ -348,7 +356,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
         `   ${entry.notas} (${entry.modo} · ${entry.calificacion})`,
         "",
         "¿Qué hago?",
-      ].join("\n") + note,
+      ].join("\n") + note + ctx,
       { keyboard, replyTo: msg.message_id }, // reply_to lets the callback re-read this text
     );
     return;
@@ -356,7 +364,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
 
   // No collision → save directly.
   const row = await append(sheetClient(env), entry);
-  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${note}${tech("append", row)}`, {
+  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${note}${ctx}${tech("append", row)}`, {
     keyboard: editKeyboard(row),
   });
 
