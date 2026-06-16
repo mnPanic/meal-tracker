@@ -25,7 +25,7 @@ flowchart TD
     CB -->|re-extrae texto/transcript| EX
     EX --> OK{completo y claro?}
     OK -->|no| ASK[pregunta aclaraciones · no guarda]
-    OK -->|sí| RB[readDay hoy]
+    OK -->|sí| RB[readDay fecha]
     RB --> COL{ya existe esa Comida?}
     COL -->|no| AP[append]
     COL -->|sí| BTN[botones: Reemplazar / Cancelar]
@@ -39,6 +39,8 @@ flowchart TD
     end
 
     AP --> R[✅ respuesta + botón Editar]
+    AP -->|si es Cena| REC[recap día/semana/mes · readDiario/Semanal/Mensual]
+    REC --> GS
     EX -. OpenAI API .-> OAI[gpt-4o-mini]
     TR -. OpenAI API .-> OAI
 ```
