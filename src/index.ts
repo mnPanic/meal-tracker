@@ -65,6 +65,25 @@ function comidaHint(): { fecha: string; comida: string } {
   return { fecha: todayISO(), comida };
 }
 
+// Compact block of recent meals (one line per day) to give the model context.
+function formatRecientes(rows: DiarioRow[]): string {
+  const slots: [keyof DiarioRow["notas"], string][] = [
+    ["desayuno", "Desayuno"],
+    ["almuerzo", "Almuerzo"],
+    ["merienda", "Merienda"],
+    ["cena", "Cena"],
+  ];
+  return rows
+    .map((r) => {
+      const items = slots
+        .map(([k, label]) => (r.notas[k] ? `${label}: ${r.notas[k]}` : null))
+        .filter(Boolean)
+        .join("; ");
+      return `${r.fecha}: ${items || "(sin registros)"}`;
+    })
+    .join("\n");
+}
+
 function sheetClient(env: Bindings): SheetClient {
   return { url: env.SHEETS_WEBAPP_URL, secret: env.SHEETS_API_SECRET };
 }
@@ -257,12 +276,13 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
 
   const now = nowBA();
   const hint = comidaHint();
+  const recientes = formatRecientes(await readDiario(sheetClient(env), 2));
 
   // Is this a reply to an "editing row N" prompt? → overwrite that row with the correction.
   const editMatch = msg.reply_to_message?.text?.match(EDIT_RE);
   if (editMatch) {
     const row = Number(editMatch[1]);
-    const corrected = await extract(env.OPENAI_API_KEY, userText, now, hint);
+    const corrected = await extract(env.OPENAI_API_KEY, userText, now, hint, recientes);
     await overwrite(sheetClient(env), row, corrected);
     await reply(
       token,
@@ -273,7 +293,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     return;
   }
 
-  const entry = await extract(env.OPENAI_API_KEY, userText, now, hint);
+  const entry = await extract(env.OPENAI_API_KEY, userText, now, hint, recientes);
 
   // Incomplete or ambiguous → ask, do NOT save.
   if (entry.aclaraciones.length > 0 || !entry.comida || !entry.modo || !entry.calificacion) {

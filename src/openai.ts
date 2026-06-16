@@ -43,6 +43,10 @@ implica explícitamente otra comida o fecha (gana lo explícito; resolvé las fe
 como se indica arriba). Si el mensaje es de otra fecha distinta a la del hint y la comida no
 está clara, ignorá el hint y preguntala.
 
+CONTEXTO: puede que recibas un resumen de las comidas recientes (últimos días). Usalo solo
+como apoyo para entender el mensaje y desambiguar (qué comida del día falta, lugares/eventos
+ya mencionados, etc.). No copies datos de ahí: el registro es siempre sobre el mensaje actual.
+
 Campos:
 - comida: cuál de las 4 comidas del día (Desayuno | Almuerzo | Merienda | Cena).
 - modo: de dónde salió la comida (Casa | Delivery | Afuera).
@@ -91,12 +95,15 @@ const SCHEMA = {
 
 // `now` is a human-readable BA datetime with weekday, e.g. "2026-06-15 14:30 (domingo)".
 // `hint` is the deterministic meal+date guessed from the current BA hour.
+// `recientes` is an optional preformatted block with the last days' meals, for context.
 export async function extract(
   apiKey: string,
   transcript: string,
   now: string,
   hint: { fecha: string; comida: string },
+  recientes = "",
 ): Promise<MealEntry> {
+  const contexto = recientes ? `\nComidas recientes (contexto):\n${recientes}` : "";
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
@@ -106,7 +113,7 @@ export async function extract(
         { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: `Ahora es ${now} (Argentina).\nPor la hora, lo más probable es la ${hint.comida} del ${hint.fecha}.\nMensaje: ${transcript}`,
+          content: `Ahora es ${now} (Argentina).\nPor la hora, lo más probable es la ${hint.comida} del ${hint.fecha}.${contexto}\nMensaje: ${transcript}`,
         },
       ],
       response_format: {
