@@ -10,6 +10,7 @@ import {
   type DiarioRow,
   type PeriodoRow,
   type SheetClient,
+  type SheetEntry,
 } from "./sheets";
 import { downloadFile, getFilePath } from "./telegram";
 
@@ -47,49 +48,43 @@ function nowBA(): string {
   return `${date} ${time} (${weekday})`;
 }
 
+const ORDEN = ["Desayuno", "Almuerzo", "Merienda", "Cena"];
+
+// Yesterday's ISO date relative to a YYYY-MM-DD date.
+function prevISO(fecha: string): string {
+  const [y, m, d] = fecha.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
+}
+
 // HINT (fecha + comida) para el agente, según la hora de Buenos Aires.
 // Antes de las 06 => Cena del día anterior. De día, la hora da un "techo" (la comida más
 // tardía plausible) y, como las comidas se cargan en orden, el hint es la PRIMERA comida
 // faltante hoy hasta ese techo (ej: 18h con Almuerzo sin cargar => Almuerzo, no Merienda).
-const ORDEN: (keyof DiarioRow["notas"])[] = ["desayuno", "almuerzo", "merienda", "cena"];
-const CAP = (label: string) => label.charAt(0).toUpperCase() + label.slice(1);
-
-function comidaHint(rows: DiarioRow[]): { fecha: string; comida: string } {
+// `hoy` son las comidas ya cargadas hoy (tab Comidas).
+function comidaHint(hoy: SheetEntry[]): { fecha: string; comida: string } {
   const h = Number(
     new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", hour12: false }).format(new Date()),
   );
-  if (h < 6) {
-    const [y, m, d] = todayISO().split("-").map(Number);
-    const prev = new Date(Date.UTC(y, m - 1, d - 1));
-    return { fecha: prev.toISOString().slice(0, 10), comida: "Cena" };
-  }
-  const fecha = todayISO();
+  if (h < 6) return { fecha: prevISO(todayISO()), comida: "Cena" };
   let techo = 0; // Desayuno
   if (h >= 19) techo = 3;
   else if (h >= 16) techo = 2;
   else if (h >= 12) techo = 1;
-  const hoy = rows.find((r) => r.fecha === fecha)?.notas;
+  const cargadas = new Set(hoy.map((e) => e.comida));
   // Primera comida OBLIGATORIA faltante hasta el techo (la merienda, índice 2, es opcional y
   // no cuenta como faltante). Si no falta ninguna, usar la comida del techo.
-  const idx = ORDEN.slice(0, techo + 1).findIndex((k, i) => i !== 2 && !(hoy && hoy[k]));
-  return { fecha, comida: CAP(ORDEN[idx === -1 ? techo : idx]) };
+  const idx = ORDEN.slice(0, techo + 1).findIndex((c, i) => i !== 2 && !cargadas.has(c));
+  return { fecha: todayISO(), comida: ORDEN[idx === -1 ? techo : idx] };
 }
 
 // Compact block of recent meals (one line per day) to give the model context.
-function formatRecientes(rows: DiarioRow[]): string {
-  const slots: [keyof DiarioRow["notas"], string][] = [
-    ["desayuno", "Desayuno"],
-    ["almuerzo", "Almuerzo"],
-    ["merienda", "Merienda"],
-    ["cena", "Cena"],
-  ];
-  return rows
-    .map((r) => {
-      const items = slots
-        .map(([k, label]) => (r.notas[k] ? `${label}: ${r.notas[k]}` : null))
-        .filter(Boolean)
-        .join("; ");
-      return `${r.fecha}: ${items || "(sin registros)"}`;
+function formatRecientes(days: { fecha: string; entries: SheetEntry[] }[]): string {
+  return days
+    .map(({ fecha, entries }) => {
+      const items = entries.length
+        ? entries.map((e) => `${e.comida}: ${e.notas}`).join("; ")
+        : "(sin registros)";
+      return `${fecha}: ${items}`;
     })
     .join("\n");
 }
@@ -292,9 +287,17 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   const note = transcriptNote(userText, voice);
 
   const now = nowBA();
-  const recientesRows = await readDiario(sheetClient(env), 2);
-  const hint = comidaHint(recientesRows);
-  const recientes = formatRecientes(recientesRows);
+  const today = todayISO();
+  const yesterday = prevISO(today);
+  const [hoyEntries, ayerEntries] = await Promise.all([
+    readDay(sheetClient(env), today),
+    readDay(sheetClient(env), yesterday),
+  ]);
+  const hint = comidaHint(hoyEntries);
+  const recientes = formatRecientes([
+    { fecha: yesterday, entries: ayerEntries },
+    { fecha: today, entries: hoyEntries },
+  ]);
   const ctx = ctxNote(hint, recientes);
 
   // Is this a reply to an "editing row N" prompt? → overwrite that row with the correction.
@@ -408,13 +411,21 @@ async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {
     return;
   }
 
-  const recientesRows = await readDiario(sheetClient(env), 2);
+  const today = todayISO();
+  const yesterday = prevISO(today);
+  const [hoyEntries, ayerEntries] = await Promise.all([
+    readDay(sheetClient(env), today),
+    readDay(sheetClient(env), yesterday),
+  ]);
   const entry = await extract(
     env.OPENAI_API_KEY,
     origText,
     nowBA(),
-    comidaHint(recientesRows),
-    formatRecientes(recientesRows),
+    comidaHint(hoyEntries),
+    formatRecientes([
+      { fecha: yesterday, entries: ayerEntries },
+      { fecha: today, entries: hoyEntries },
+    ]),
   );
 
   if (cq.data?.startsWith("ow:")) {
