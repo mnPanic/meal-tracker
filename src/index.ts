@@ -120,9 +120,18 @@ function reply(
   });
 }
 
-// Replace a message's text and drop its buttons (so it can't be tapped twice).
-function editText(token: string, chatId: number, messageId: number, text: string): Promise<void> {
-  return tg(token, "editMessageText", { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML" });
+// Remove a message's inline buttons without touching its text (avoids double-tap on a
+// resolved proposal, while keeping the message for traceability).
+async function dropButtons(token: string, chatId: number, messageId: number): Promise<void> {
+  try {
+    await tg(token, "editMessageReplyMarkup", {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch {
+    // Ignore "message is not modified" / already buttonless.
+  }
 }
 
 function answerCallback(token: string, callbackId: string): Promise<void> {
@@ -133,13 +142,66 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// LOAD-BEARING FORMAT: parseSummary re-parses this exact layout from proposal messages to
+// recover the entry on accept (stateless). Keep fecha/comida/modo/calificacion on line 1 and
+// notas on its own line; don't reorder without updating parseSummary.
 function summary(entry: MealEntry): string {
   return `📅 ${entry.fecha} · 🍽️ ${entry.comida} · 📍 ${entry.modo} · ⭐ ${entry.calificacion}\n📝 ${entry.notas}`;
 }
 
-// Technical footer for dev use: which sheet op ran and on which row.
+// Lines shown when an entry is incomplete/ambiguous (asks the user to confirm).
+function askLines(entry: MealEntry): string[] {
+  const v = (x: string) => (x ? x : "❓ no está claro");
+  return [
+    "Esto entendí, pero falta confirmar algo:",
+    `📅 <b>Fecha:</b> ${entry.fecha}`,
+    `🍽️ <b>Comida:</b> ${v(entry.comida)}`,
+    `📍 <b>Modo:</b> ${v(entry.modo)}`,
+    `⭐ <b>Calificación:</b> ${v(entry.calificacion)}`,
+    `📝 <b>Notas:</b> ${v(entry.notas)}`,
+    "",
+    "❓ <b>Para confirmar:</b>",
+    ...entry.aclaraciones.map((a) => `• ${a}`),
+  ];
+}
+
+// Recover the entry from a message built with summary(). Returns null if it doesn't match.
+// The header line and the notas line must be adjacent (summary()'s exact layout), so a diff
+// block above it — whose lines look like "📝 viejo → nuevo" — can't be mistaken for it.
+function parseSummary(text: string): MealEntry | null {
+  const m = text.match(/📅 (\S+) · 🍽️ (\S+) · 📍 (\S+) · ⭐ (\S+)\n📝 ([^\n]*)/);
+  if (!m) return null;
+  return { fecha: m[1], comida: m[2], modo: m[3], calificacion: m[4], notas: m[5].trim(), aclaraciones: [] };
+}
+
+// LOAD-BEARING FORMAT: parseRow recovers the row from this footer. Keep "op · fila N".
 function tech(op: string, row: number): string {
   return `\n<code>${op} · fila ${row}</code>`;
+}
+
+function parseRow(text: string): number | null {
+  const m = text.match(/(?:append|overwrite) · fila (\d+)/);
+  return m ? Number(m[1]) : null;
+}
+
+// A saved-meal message carries a date line and a "fila N" footer; lets a reply target its row.
+function isSavedMeal(text: string): boolean {
+  return /📅 \d{4}-\d{2}-\d{2}/.test(text) && parseRow(text) !== null;
+}
+
+// Lines for the fields that change between the saved entry and the proposal.
+function diff(base: MealEntry, prop: MealEntry): string {
+  const rows: [string, string, string][] = [
+    ["📅", base.fecha, prop.fecha],
+    ["🍽️", base.comida, prop.comida],
+    ["📍", base.modo, prop.modo],
+    ["⭐", base.calificacion, prop.calificacion],
+    ["📝", base.notas, prop.notas],
+  ];
+  const changed = rows
+    .filter(([, a, b]) => a !== b)
+    .map(([e, a, b]) => `${e} ${a || "—"} → <b>${b || "—"}</b>`);
+  return changed.length ? changed.join("\n") : "(sin cambios)";
 }
 
 // --- Cierres de ciclo (recaps) ---
@@ -233,13 +295,15 @@ function ctxNote(hint: { fecha: string; comida: string }, recientes: string): st
   return `\n<code>${escapeHtml(lines.join("\n"))}</code>`;
 }
 
-// Marker baked into the "editing" prompt so a reply can recover the row (stateless).
-const EDIT_RE = /Editando la fila (\d+)/;
-// Transcript echoed in the collision message (see transcriptNote); lets a callback re-extract
-// from a voice note that has no `reply_to_message.text` of its own (stateless).
-const TRANSCRIPT_RE = /🎤 (.+)$/;
-const editKeyboard = (row: number): InlineKeyboard => ({
-  inline_keyboard: [[{ text: "✏️ Editar", callback_data: `ed:${row}` }]],
+// Proposal buttons. Accept carries the target row; the proposed entry is re-parsed from the
+// message's summary() on accept (stateless). Both edits and collisions are overwrites.
+const proposalKeyboard = (row: number): InlineKeyboard => ({
+  inline_keyboard: [
+    [
+      { text: "✅ Aceptar", callback_data: `ok:overwrite:${row}` },
+      { text: "✖️ Rechazar", callback_data: "no" },
+    ],
+  ],
 });
 interface TgCallback {
   id: string;
@@ -300,17 +364,28 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   ]);
   const ctx = ctxNote(hint, recientes);
 
-  // Is this a reply to an "editing row N" prompt? → overwrite that row with the correction.
-  const editMatch = msg.reply_to_message?.text?.match(EDIT_RE);
-  if (editMatch) {
-    const row = Number(editMatch[1]);
-    const corrected = await extract(env.OPENAI_API_KEY, userText, now, hint, recientes);
-    await overwrite(sheetClient(env), row, corrected);
+  // Reply to a saved-meal message? → treat the text as a correction of that row, with the
+  // saved entry as context. Emit a proposal to accept/reject (does not write yet).
+  const repliedText = msg.reply_to_message?.text;
+  if (repliedText && isSavedMeal(repliedText)) {
+    const row = parseRow(repliedText);
+    const fecha = parseSummary(repliedText)?.fecha;
+    const base = row && fecha ? (await readDay(sheetClient(env), fecha)).find((e) => e.row === row) : undefined;
+    if (!row || !fecha || !base) {
+      await reply(token, msg.chat.id, "No pude releer ese registro para editarlo (¿fuera de la ventana de 7 días?).");
+      return;
+    }
+    const baseEntry: MealEntry = { fecha, comida: base.comida, modo: base.modo, calificacion: base.calificacion, notas: base.notas, aclaraciones: [] };
+    const prop = await extract(env.OPENAI_API_KEY, userText, now, hint, recientes, baseEntry);
+    if (prop.aclaraciones.length > 0) {
+      await reply(token, msg.chat.id, askLines(prop).join("\n") + note);
+      return;
+    }
     await reply(
       token,
       msg.chat.id,
-      `✏️ <b>Editado</b>\n${summary(corrected)}${note}${ctx}${tech("overwrite", row)}`,
-      { keyboard: editKeyboard(row) },
+      `✏️ <b>Propuesta de edición</b> (fila ${row})\n${diff(baseEntry, prop)}\n\n${summary(prop)}${note}${tech("overwrite", row)}`,
+      { keyboard: proposalKeyboard(row), replyTo: msg.message_id },
     );
     return;
   }
@@ -319,19 +394,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
 
   // Incomplete or ambiguous → ask, do NOT save.
   if (entry.aclaraciones.length > 0 || !entry.comida || !entry.modo || !entry.calificacion) {
-    const v = (x: string) => (x ? x : "❓ no está claro");
-    const lines = [
-      "Esto entendí, pero falta confirmar algo:",
-      `📅 <b>Fecha:</b> ${entry.fecha}`,
-      `🍽️ <b>Comida:</b> ${v(entry.comida)}`,
-      `📍 <b>Modo:</b> ${v(entry.modo)}`,
-      `⭐ <b>Calificación:</b> ${v(entry.calificacion)}`,
-      `📝 <b>Notas:</b> ${v(entry.notas)}`,
-      "",
-      "❓ <b>Para confirmar:</b>",
-      ...entry.aclaraciones.map((a) => `• ${a}`),
-    ];
-    await reply(token, msg.chat.id, lines.join("\n") + note + ctx);
+    await reply(token, msg.chat.id, askLines(entry).join("\n") + note + ctx);
     return;
   }
 
@@ -339,37 +402,27 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   const existing = (await readDay(sheetClient(env), entry.fecha)).find((e) => e.comida === entry.comida);
 
   if (existing) {
-    // Don't decide silently — ask. Row number rides in the callback_data (stateless).
-    const keyboard: InlineKeyboard = {
-      inline_keyboard: [
-        [
-          { text: "✏️ Reemplazar", callback_data: `ow:${existing.row}` },
-          { text: "✖️ Cancelar", callback_data: "no" },
-        ],
-      ],
+    // Don't decide silently — propose a replacement to accept/reject (same mechanism as edits).
+    const existingEntry: MealEntry = {
+      fecha: entry.fecha,
+      comida: existing.comida,
+      modo: existing.modo,
+      calificacion: existing.calificacion,
+      notas: existing.notas,
+      aclaraciones: [],
     };
     await reply(
       token,
       msg.chat.id,
-      [
-        `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}:`,
-        `   ${existing.notas}`,
-        "",
-        "Lo nuevo sería:",
-        `   ${entry.notas} (${entry.modo} · ${entry.calificacion})`,
-        "",
-        "¿Qué hago?",
-      ].join("\n") + note + ctx,
-      { keyboard, replyTo: msg.message_id }, // reply_to lets the callback re-read this text
+      `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}. Propuesta de reemplazo:\n${diff(existingEntry, entry)}\n\n${summary(entry)}${note}${tech("overwrite", existing.row)}`,
+      { keyboard: proposalKeyboard(existing.row), replyTo: msg.message_id },
     );
     return;
   }
 
-  // No collision → save directly.
+  // No collision → save directly (new meals don't need accept/reject).
   const row = await append(sheetClient(env), entry);
-  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${note}${ctx}${tech("append", row)}`, {
-    keyboard: editKeyboard(row),
-  });
+  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${note}${ctx}${tech("append", row)}`);
 
   // Si la Cena cierra el día (y quizá semana/mes), mandar los recaps.
   if (entry.comida === "Cena") {
@@ -383,60 +436,29 @@ async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {
   const messageId = cq.message.message_id;
   await answerCallback(token, cq.id); // stop the button's loading spinner
 
+  // Reject: keep the proposal text for the record, just drop its buttons.
   if (cq.data === "no") {
-    await editText(token, chatId, messageId, "✖️ Cancelado, no guardé nada.");
+    await dropButtons(token, chatId, messageId);
+    await reply(token, chatId, "✖️ Descartado.", { replyTo: messageId });
     return;
   }
 
-  // Edit: ask for the corrected version. The row is baked into the prompt text so the
-  // user's reply can recover it (see EDIT_RE in handleMessage).
-  if (cq.data?.startsWith("ed:")) {
-    const row = Number(cq.data.slice(3));
-    await editText(
-      token,
-      chatId,
-      messageId,
-      `✏️ <b>Editando la fila ${row}</b>\nRespondé a este mensaje con la versión corregida.`,
-    );
-    return;
-  }
+  // Accept: re-parse the proposed entry from the message's summary() and apply it.
+  if (cq.data?.startsWith("ok:overwrite:")) {
+    const row = Number(cq.data.split(":")[2]);
+    const prop = parseSummary(cq.message.text ?? "");
+    if (!prop) {
+      await reply(token, chatId, "❌ No pude leer la propuesta, reenviá la corrección.", { replyTo: messageId });
+      return;
+    }
+    await overwrite(sheetClient(env), row, prop);
+    await dropButtons(token, chatId, messageId);
+    await reply(token, chatId, `✅ <b>Aplicado</b>\n${summary(prop)}${tech("overwrite", row)}`, { replyTo: messageId });
 
-  // Re-extract from the original message the buttons replied to (stateless: no stored draft).
-  // For text the original message carries it; for a voice note it has no text, so fall back to
-  // the transcript echoed in this collision message's own footer (🎤 ...).
-  const origText =
-    cq.message.reply_to_message?.text || cq.message.text?.match(TRANSCRIPT_RE)?.[1];
-  if (!origText) {
-    await editText(token, chatId, messageId, "❌ Perdí el mensaje original, reenvialo por favor.");
-    return;
-  }
-
-  const today = todayISO();
-  const yesterday = prevISO(today);
-  const [hoyEntries, ayerEntries] = await Promise.all([
-    readDay(sheetClient(env), today),
-    readDay(sheetClient(env), yesterday),
-  ]);
-  const entry = await extract(
-    env.OPENAI_API_KEY,
-    origText,
-    nowBA(),
-    comidaHint(hoyEntries),
-    formatRecientes([
-      { fecha: yesterday, entries: ayerEntries },
-      { fecha: today, entries: hoyEntries },
-    ]),
-  );
-
-  if (cq.data?.startsWith("ow:")) {
-    const row = Number(cq.data.slice(3));
-    await overwrite(sheetClient(env), row, entry);
-    await editText(
-      token,
-      chatId,
-      messageId,
-      `✏️ <b>Reemplazado</b>\n${summary(entry)}${tech("overwrite", row)}`,
-    );
+    // Si la edición deja una Cena, recalcular los recaps del ciclo.
+    if (prop.comida === "Cena") {
+      await sendCierres(env, chatId, prop.fecha);
+    }
   }
 }
 

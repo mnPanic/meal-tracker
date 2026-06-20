@@ -57,6 +57,7 @@ Campos:
 - notas: descripción de la comida en estilo telegráfico (sin verbos como "comí/cené"), conciso
   pero sin dejar detalles afuera (no descartes ingredientes ni cantidades que se mencionen).
   No repitas el modo (Casa/Delivery/Afuera) en las notas, ya va en su propio campo.
+  Las notas van SIEMPRE en una sola línea (sin saltos de línea).
 
 FORMATO DE NOTAS: "{lugar|evento} - plato". Es decir, si hay un lugar o un evento, va como prefijo
 seguido de " - " y después el plato. Reglas:
@@ -93,28 +94,48 @@ const SCHEMA = {
   required: ["fecha", "comida", "modo", "calificacion", "notas", "aclaraciones"],
 } as const;
 
+// Sección extra del prompt para cuando se está editando un registro existente.
+const EDIT_SECTION = `
+
+EDICIÓN: estás editando un registro que YA existe (te paso "Registro actual"). El mensaje es
+una corrección sobre ese registro. Aplicá SOLO los cambios que la corrección indica
+explícitamente y conservá tal cual todos los campos no mencionados. Devolvé el registro
+COMPLETO ya actualizado. La fecha del registro actual NO cambia salvo que la corrección la
+cambie explícitamente. No pidas aclaraciones por campos que ya estaban completos en el
+registro actual; "aclaraciones" queda vacío salvo que la corrección introduzca una ambigüedad
+nueva (ej: cambiar el modo a Delivery/Afuera sin dar el lugar).`;
+
 // `now` is a human-readable BA datetime with weekday, e.g. "2026-06-15 14:30 (domingo)".
 // `hint` is the deterministic meal+date guessed from the current BA hour.
 // `recientes` is an optional preformatted block with the last days' meals, for context.
+// `base` (when set) is the currently-saved entry being edited; `transcript` is the correction.
 export async function extract(
   apiKey: string,
   transcript: string,
   now: string,
   hint: { fecha: string; comida: string },
   recientes = "",
+  base?: MealEntry,
 ): Promise<MealEntry> {
   const contexto = recientes ? `\nComidas recientes (contexto):\n${recientes}` : "";
+  const system = base ? SYSTEM_PROMPT + EDIT_SECTION : SYSTEM_PROMPT;
+  const userContent = base
+    ? `Ahora es ${now} (Argentina).${contexto}\nRegistro actual: ${JSON.stringify({
+        fecha: base.fecha,
+        comida: base.comida,
+        modo: base.modo,
+        calificacion: base.calificacion,
+        notas: base.notas,
+      })}\nCorrección: ${transcript}`
+    : `Ahora es ${now} (Argentina).\nPor la hora, lo más probable es la ${hint.comida} del ${hint.fecha}.${contexto}\nMensaje: ${transcript}`;
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: `Ahora es ${now} (Argentina).\nPor la hora, lo más probable es la ${hint.comida} del ${hint.fecha}.${contexto}\nMensaje: ${transcript}`,
-        },
+        { role: "system", content: system },
+        { role: "user", content: userContent },
       ],
       response_format: {
         type: "json_schema",
