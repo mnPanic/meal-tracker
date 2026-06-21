@@ -8,41 +8,20 @@ corre gratis en Cloudflare Workers.
 ## Arquitectura
 
 ```mermaid
-flowchart TD
-    U[📱 Telegram] -->|webhook POST| W
+graph LR
+    TG[📱 Telegram<br/>Bot API]
+    OAI[🤖 OpenAI<br/>transcribe + extract]
+    AS[📊 Apps Script<br/>Web App]
+    SH[(Google Sheet<br/>'Comidas' + views)]
 
-    subgraph CF[Cloudflare Worker · Hono]
-      W[/webhook/] --> AUTH{secret token OK?}
-      AUTH -->|no| F[403]
-      AUTH -->|sí| K{tipo de update}
-      K -->|message| M[handleMessage]
-      K -->|callback_query| CB[handleCallback]
+    subgraph CF[☁️ Cloudflare Worker · Hono]
+      W[src/index.ts<br/>webhook · orquestación]
     end
 
-    M -->|voz/audio| TR[OpenAI: transcribe]
-    M -->|texto| EX
-    TR --> EX[OpenAI: extract → JSON]
-    CB -->|re-extrae texto/transcript| EX
-    EX --> OK{completo y claro?}
-    OK -->|no| ASK[pregunta aclaraciones · no guarda]
-    OK -->|sí| RB[readDay fecha]
-    RB --> COL{ya existe esa Comida?}
-    COL -->|no| AP[append]
-    COL -->|sí| BTN[botones: Reemplazar / Cancelar]
-    BTN -.callback.-> CB
-
-    AP --> GS
-    CB --> GS
-
-    subgraph G[Apps Script Web App]
-      GS[doGet / doPost] --> SH[(Sheet 'Comidas')]
-    end
-
-    AP --> R[✅ respuesta + botón Editar]
-    AP -->|si es Cena| REC[recap día/semana/mes · readDiario/Semanal/Mensual]
-    REC --> GS
-    EX -. OpenAI API .-> OAI[gpt-4o-mini]
-    TR -. OpenAI API .-> OAI
+    TG <-->|webhook POST / sendMessage| W
+    W <-->|transcribe voz · extract → JSON| OAI
+    W <-->|read / append / overwrite / views| AS
+    AS <--> SH
 ```
 
 ### Componentes
@@ -50,6 +29,7 @@ flowchart TD
 | Pieza | Archivo | Rol |
 |---|---|---|
 | Worker / webhook | `src/index.ts` | Recibe updates de Telegram, orquesta el flujo, responde. |
+| Lógica pura | `src/logic.ts` | Helpers sin side-effects (hint de comida, parse/format de mensajes, diff/summary), testeados en `test/logic.test.ts`. |
 | Telegram | `src/telegram.ts` | Helpers de la Bot API (descarga de archivos para notas de voz). |
 | Transcripción + extracción | `src/openai.ts` | `gpt-4o-mini-transcribe` (voz→texto) + `gpt-4o-mini` structured outputs → `MealEntry`. |
 | Cliente del sheet | `src/sheets.ts` | Llama al Apps Script (read/append/overwrite + views), con token. |
@@ -58,18 +38,24 @@ flowchart TD
 ## Flujo
 
 1. **Mensaje de texto o nota de voz** → la voz se transcribe con `transcribe()`, después
-   `extract()` saca `comida / modo / calificacion / notas`. Ambos caminos comparten el pipeline.
+   `extract()` saca `fecha / comida / modo / calificacion / notas` + una `accion`
+   (`agregar` | `editar`). Ambos caminos comparten el pipeline.
 2. **No infiere**: si falta algo o el modo es Delivery/Afuera sin lugar, **pregunta** y no guarda.
-3. **Read-before-write**: lee el día; si ya hay esa comida, ofrece **Reemplazar / Cancelar**
-   (la fila viaja en el `callback_data`, stateless). No se agregan duplicados de la misma comida.
-4. **Guarda** → `append`, responde `✅ Guardado` con botón **✏️ Editar**.
-5. **Editar**: tocás el botón → respondés (texto o voz) con la corrección → `overwrite` de esa fila.
-6. **Cierres de ciclo**: la Cena es el último momento del día. Al hacer `append` de una Cena, el bot
-   manda el **recap del día** (`readDiario`); si esa fecha es domingo, también el **semanal**
-   (`readSemanal`); si es el último día del mes, el **mensual** (`readMensual`). Event-driven, sin cron.
+3. **Read-before-write**: lee el día y ubica la fila que tocaría (misma comida, o la fila exacta si
+   el mensaje responde a un registro guardado). Si hay match —edición o colisión con una comida ya
+   cargada— propone un **overwrite** con botones **✅ Aceptar / ✖️ Rechazar** (la fila viaja en el
+   `callback_data` y la propuesta se re-parsea del texto al aceptar, todo stateless). No se agregan
+   duplicados de la misma comida.
+4. **Guarda** → una comida nueva sin colisión se hace `append` directo y responde `✅ Guardado`.
+5. **Editar**: respondés (texto o voz) a un mensaje de comida guardada; ese registro se le pasa al
+   modelo como contexto fuerte y, si decide `editar`, propone el `overwrite` de esa fila (paso 3).
+6. **Cierres de ciclo**: la Cena es el último momento del día. Al guardar una Cena (`append` o
+   `overwrite`), el bot manda el **recap del día** (`readDiario`); si esa fecha es domingo, también
+   el **semanal** (`readSemanal`); si es el último día del mes, el **mensual** (`readMensual`).
+   Event-driven, sin cron.
 
-Las respuestas que vienen de una nota de voz incluyen el transcript en un footer (`🎤 …`) para
-debugging; ese mismo footer es lo que deja al flujo de colisión re-extraer de forma stateless.
+Cada respuesta incluye, en un bloque colapsable **🧩 Contexto del LLM**, el mensaje/transcript
+original (`💬`/`🎤`) más el hint y las comidas recientes que se le pasaron al modelo, para debugging.
 
 ### Reglas de dominio
 
@@ -87,6 +73,13 @@ debugging; ese mismo footer es lo que deja al flujo de colisión re-extraer de f
   futuro), con chequeo server-side usando el reloj de BA. `append` exige `fecha` (sin default).
 - Acceso "Anyone" + **secret token** en cada request (la URL puede ser pública, el token no).
 - Detalle completo del contrato: [`apps-script/README.md`](apps-script/README.md).
+
+### Candado por chat (Worker)
+
+El webhook secret prueba que el POST viene de Telegram, pero no **quién** escribió. Para que solo
+vos puedas escribir en el sheet, el Worker filtra por `ALLOWED_CHAT_ID`: cualquier chat distinto se
+ignora respondiendo `200 ok` (no 403, para no darle pistas al de afuera ni gatillar reintentos). Si
+queda vacío no se filtra (útil en dev).
 
 ## Datos del sheet
 
@@ -109,6 +102,7 @@ npx wrangler secret put TELEGRAM_WEBHOOK_SECRET  # random; valida cada webhook
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put SHEETS_WEBAPP_URL        # URL /exec del Apps Script
 npx wrangler secret put SHEETS_API_SECRET        # = Script Property API_SECRET
+npx wrangler secret put ALLOWED_CHAT_ID          # tu chat id de Telegram (candá el bot a vos)
 ```
 
 Registrar el webhook (una vez):

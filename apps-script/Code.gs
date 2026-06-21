@@ -119,11 +119,11 @@ function readDiario_(p) {
   return json_({ ok: true, view: "diario", rows: rows });
 }
 
-// Read one of the two side-by-side tables in "View semanalmensual".
+// Read one of the two side-by-side tables in "View semanal/mensual".
 // kind "semanal" = cols A-D, "mensual" = cols F-I. Optional ?last=N.
 function readPeriodo_(kind, p) {
   var off = kind === "mensual" ? 5 : 0; // column offset (F is index 5)
-  var values = sheetByName_("View semanalmensual").getDataRange().getValues();
+  var values = sheetByName_("View semanal/mensual").getDataRange().getValues();
   var rows = [];
   for (var i = 1; i < values.length; i++) {
     var r = values[i];
