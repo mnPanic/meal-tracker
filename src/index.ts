@@ -32,6 +32,9 @@ type Bindings = {
   OPENAI_API_KEY: string;
   SHEETS_WEBAPP_URL: string;
   SHEETS_API_SECRET: string;
+  // Chat id permitido (el tuyo). Candás el bot a un solo chat: cualquier otro se ignora.
+  // Si queda vacío, no se filtra (útil en dev).
+  ALLOWED_CHAT_ID?: string;
 };
 
 const TZ = "America/Argentina/Buenos_Aires";
@@ -268,6 +271,14 @@ app.post("/webhook", async (c) => {
 
   const update = (await c.req.json()) as { message?: TgMessage; callback_query?: TgCallback };
   const env = c.env;
+
+  // Candado por chat: el webhook secret solo prueba que el POST viene de Telegram, no QUIÉN
+  // escribió. Sin esto, cualquier usuario que encuentre el bot puede escribir en el sheet.
+  // Respondemos 200 (no 403) para no darle pistas al de afuera y que Telegram no reintente.
+  const fromChat = update.message?.chat.id ?? update.callback_query?.message.chat.id;
+  if (env.ALLOWED_CHAT_ID && String(fromChat) !== env.ALLOWED_CHAT_ID) {
+    return c.json({ ok: true });
+  }
 
   try {
     if (update.callback_query) {
