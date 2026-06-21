@@ -175,9 +175,9 @@ function parseSummary(text: string): MealEntry | null {
 }
 
 // LOAD-BEARING FORMAT: parseRow recovers the row from this footer. Keep "op · fila N".
-// Returns inner text only; wrap it with techFooter() to render it collapsed.
+// Visible (not collapsed) sheet action; goes above the collapsed LLM context.
 function tech(op: string, row: number): string {
-  return `${op} · fila ${row}`;
+  return `\nacciones: <code>${op} · fila ${row}</code>`;
 }
 
 function parseRow(text: string): number | null {
@@ -291,18 +291,18 @@ function transcriptNote(userText: string, voice: boolean): string {
 
 // Inner text showing the context fed to the model (hint + recent meals), for debugging.
 function ctxNote(hint: { fecha: string; comida: string }, recientes: string): string {
-  const lines = [`🧩 hint: ${hint.comida} ${hint.fecha}`];
+  const lines = [`hint: ${hint.comida} ${hint.fecha}`];
   if (recientes) lines.push("recientes:", recientes);
   return escapeHtml(lines.join("\n"));
 }
 
-// Wrap the technical bits (transcript, context, sheet op) in one expandable blockquote so
-// they show collapsed by default. A short header line is all that shows until expanded.
-// Skips empty parts; returns "" if nothing to show.
-function techFooter(...parts: string[]): string {
+// Wrap the LLM context bits (transcript + hint + recent meals) in one expandable blockquote
+// so they show collapsed by default. Only the "🧩 Contexto del LLM" header shows until
+// expanded. Skips empty parts; returns "" if nothing to show.
+function llmFooter(...parts: string[]): string {
   const body = parts.filter(Boolean).join("\n");
   if (!body) return "";
-  return `\n<blockquote expandable>Contexto del LLM\n\n\n<code>${body}</code></blockquote>`;
+  return `\n<blockquote expandable>🧩 Contexto del LLM\n\n\n<code>${body}</code></blockquote>`;
 }
 
 // Proposal buttons. Accept carries the target row; the proposed entry is re-parsed from the
@@ -388,13 +388,13 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     const baseEntry: MealEntry = { fecha, comida: base.comida, modo: base.modo, calificacion: base.calificacion, notas: base.notas, aclaraciones: [] };
     const prop = await extract(env.OPENAI_API_KEY, userText, now, hint, recientes, baseEntry);
     if (prop.aclaraciones.length > 0) {
-      await reply(token, msg.chat.id, askLines(prop).join("\n") + techFooter(note));
+      await reply(token, msg.chat.id, askLines(prop).join("\n") + llmFooter(note));
       return;
     }
     await reply(
       token,
       msg.chat.id,
-      `✏️ <b>Propuesta de edición</b> (fila ${row})\n${diff(baseEntry, prop)}\n\n${summary(prop)}${techFooter(note, tech("overwrite", row))}`,
+      `✏️ <b>Propuesta de edición</b> (fila ${row})\n${diff(baseEntry, prop)}\n\n${summary(prop)}${tech("overwrite", row)}${llmFooter(note)}`,
       { keyboard: proposalKeyboard(row), replyTo: msg.message_id },
     );
     return;
@@ -404,7 +404,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
 
   // Incomplete or ambiguous → ask, do NOT save.
   if (entry.aclaraciones.length > 0 || !entry.comida || !entry.modo || !entry.calificacion) {
-    await reply(token, msg.chat.id, askLines(entry).join("\n") + techFooter(note, ctx));
+    await reply(token, msg.chat.id, askLines(entry).join("\n") + llmFooter(note, ctx));
     return;
   }
 
@@ -424,7 +424,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     await reply(
       token,
       msg.chat.id,
-      `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}. Propuesta de reemplazo:\n${diff(existingEntry, entry)}\n\n${summary(entry)}${techFooter(note, tech("overwrite", existing.row))}`,
+      `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}. Propuesta de reemplazo:\n${diff(existingEntry, entry)}\n\n${summary(entry)}${tech("overwrite", existing.row)}${llmFooter(note)}`,
       { keyboard: proposalKeyboard(existing.row), replyTo: msg.message_id },
     );
     return;
@@ -432,7 +432,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
 
   // No collision → save directly (new meals don't need accept/reject).
   const row = await append(sheetClient(env), entry);
-  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${techFooter(note, ctx, tech("append", row))}`);
+  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${tech("append", row)}${llmFooter(note, ctx)}`);
 
   // Si la Cena cierra el día (y quizá semana/mes), mandar los recaps.
   if (entry.comida === "Cena") {
@@ -463,7 +463,7 @@ async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {
     }
     await overwrite(sheetClient(env), row, prop);
     await dropButtons(token, chatId, messageId);
-    await reply(token, chatId, `✅ <b>Aplicado</b>\n${summary(prop)}${techFooter(tech("overwrite", row))}`, { replyTo: messageId });
+    await reply(token, chatId, `✅ <b>Aplicado</b>\n${summary(prop)}${tech("overwrite", row)}`, { replyTo: messageId });
 
     // Si la edición deja una Cena, recalcular los recaps del ciclo.
     if (prop.comida === "Cena") {
