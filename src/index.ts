@@ -297,10 +297,12 @@ function ctxNote(hint: { fecha: string; comida: string }, recientes: string): st
 }
 
 // Wrap the technical bits (transcript, context, sheet op) in one expandable blockquote so
-// they show collapsed by default. Skips empty parts; returns "" if nothing to show.
+// they show collapsed by default. A short header line is all that shows until expanded.
+// Skips empty parts; returns "" if nothing to show.
 function techFooter(...parts: string[]): string {
   const body = parts.filter(Boolean).join("\n");
-  return body ? `\n<blockquote expandable>${body}</blockquote>` : "";
+  if (!body) return "";
+  return `\n<blockquote expandable>Contexto del LLM\n\n\n<code>${body}</code></blockquote>`;
 }
 
 // Proposal buttons. Accept carries the target row; the proposed entry is re-parsed from the
