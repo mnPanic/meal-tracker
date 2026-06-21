@@ -6,6 +6,7 @@ export interface MealEntry {
   modo: string; // Casa|Delivery|Afuera, o "" si no está claro
   calificacion: string; // OK|Mid|Bad, o "" si no está claro
   notas: string;
+  accion: string; // "agregar" (comida nueva) | "editar" (corrección de una ya registrada)
   // Por cada campo que no esté claro, una aclaración/pregunta para el usuario.
   aclaraciones: string[];
 }
@@ -35,17 +36,27 @@ Pero si el mensaje menciona otra fecha, RESOLVELA relativa al ahora y usá esa:
   semana más reciente ya pasado; "el 12" o "12/06" = esa fecha del mes actual.
 Devolvé "fecha" siempre en formato YYYY-MM-DD. Si no se menciona ninguna fecha, usá hoy.
 
-HORA: junto al ahora recibís una "comida probable" (comida + fecha) calculada
-automáticamente a partir de la hora actual de Argentina (tomando la comida anterior más
-cercana; en la madrugada eso es la Cena del día anterior). Usá ESA comida y ESA fecha por
-defecto cuando el mensaje no diga otra cosa. Apartate del hint si el mensaje menciona o
-implica explícitamente otra comida o fecha (gana lo explícito; resolvé las fechas relativas
-como se indica arriba). Si el mensaje es de otra fecha distinta a la del hint y la comida no
-está clara, ignorá el hint y preguntala.
+HORA / PENDIENTES: junto al ahora recibís una lista determinística de comidas PENDIENTES (en
+orden) calculada a partir de la hora de Argentina y de lo ya cargado, con la más probable
+marcada. Es solo una guía: usala cuando el mensaje no diga otra cosa, pero GANA SIEMPRE lo que
+el mensaje menciona o implica explícitamente (comida y/o fecha; resolvé las fechas relativas
+como se indica arriba). Si el mensaje nombra una comida (ej: "desayuné"), usá ESA aunque la guía
+sugiera otra. Si el mensaje es de otra fecha y la comida no está clara, preguntala.
 
-CONTEXTO: puede que recibas un resumen de las comidas recientes (últimos días). Usalo solo
-como apoyo para entender el mensaje y desambiguar (qué comida del día falta, lugares/eventos
-ya mencionados, etc.). No copies datos de ahí: el registro es siempre sobre el mensaje actual.
+CONTEXTO: recibís un resumen de las comidas recientes (últimos días) con su modo, calificación y
+notas. Usalo para entender el mensaje, desambiguar y —cuando estés EDITANDO— recuperar los
+campos que el mensaje no menciona. No copies datos de ahí hacia comidas nuevas: el registro es
+sobre el mensaje actual.
+
+ACCIÓN: elegí una de dos y devolvela en "accion":
+- "agregar": es una comida NUEVA, que todavía no figura en las comidas recientes de ese día.
+- "editar": es una corrección o complemento de una comida que YA figura en las comidas recientes
+  (mismo día y misma comida). Si la comida que estás registrando ya aparece cargada ese día,
+  usá "editar". Al editar, devolvé el registro COMPLETO ya actualizado: partí de los valores
+  actuales de esa comida (te los paso en el contexto) y aplicá SOLO los cambios que el mensaje
+  indica, conservando lo demás. No pidas aclaraciones por campos que ya estaban completos.
+Si el usuario está respondiendo a un registro ya guardado (te lo paso aparte), casi siempre es
+"editar" ese registro.
 
 Campos:
 - comida: cuál de las 4 comidas del día (Desayuno | Almuerzo | Merienda | Cena).
@@ -85,49 +96,36 @@ const SCHEMA = {
     modo: { type: "string", description: "Casa|Delivery|Afuera, o \"\" si no está claro" },
     calificacion: { type: "string", description: "OK|Mid|Bad (calidad nutricional), o \"\" si no está claro" },
     notas: { type: "string", description: "estilo '{lugar|evento} - plato'; lugar esperado en Delivery/Afuera" },
+    accion: { type: "string", enum: ["agregar", "editar"], description: "agregar = comida nueva; editar = corrección de una ya registrada ese día" },
     aclaraciones: {
       type: "array",
       items: { type: "string" },
       description: "preguntas/aclaraciones para el usuario por cada campo que no esté claro; vacío si todo claro",
     },
   },
-  required: ["fecha", "comida", "modo", "calificacion", "notas", "aclaraciones"],
+  required: ["fecha", "comida", "modo", "calificacion", "notas", "accion", "aclaraciones"],
 } as const;
 
-// Sección extra del prompt para cuando se está editando un registro existente.
-const EDIT_SECTION = `
-
-EDICIÓN: estás editando un registro que YA existe (te paso "Registro actual"). El mensaje es
-una corrección sobre ese registro. Aplicá SOLO los cambios que la corrección indica
-explícitamente y conservá tal cual todos los campos no mencionados. Devolvé el registro
-COMPLETO ya actualizado. La fecha del registro actual NO cambia salvo que la corrección la
-cambie explícitamente. No pidas aclaraciones por campos que ya estaban completos en el
-registro actual; "aclaraciones" queda vacío salvo que la corrección introduzca una ambigüedad
-nueva (ej: cambiar el modo a Delivery/Afuera sin dar el lugar).`;
-
 // `now` is a human-readable BA datetime with weekday, e.g. "2026-06-15 14:30 (domingo)".
-// `hint` is the deterministic meal+date guessed from the current BA hour.
-// `recientes` is an optional preformatted block with the last days' meals, for context.
-// `base` (when set) is the currently-saved entry being edited; `transcript` is the correction.
+// `hintTexto` is the deterministic pending-meals guide for the current BA hour.
+// `recientes` is an optional preformatted block with the last days' meals (with their fields).
+// `replied` (when set) is the saved record the user is replying to; the model usually edits it.
 export async function extract(
   apiKey: string,
   transcript: string,
   now: string,
-  hint: { fecha: string; comida: string },
+  hintTexto: string,
   recientes = "",
-  base?: MealEntry,
+  replied = "",
 ): Promise<MealEntry> {
-  const contexto = recientes ? `\nComidas recientes (contexto):\n${recientes}` : "";
-  const system = base ? SYSTEM_PROMPT + EDIT_SECTION : SYSTEM_PROMPT;
-  const userContent = base
-    ? `Ahora es ${now} (Argentina).${contexto}\nRegistro actual: ${JSON.stringify({
-        fecha: base.fecha,
-        comida: base.comida,
-        modo: base.modo,
-        calificacion: base.calificacion,
-        notas: base.notas,
-      })}\nCorrección: ${transcript}`
-    : `Ahora es ${now} (Argentina).\nPor la hora, lo más probable es la ${hint.comida} del ${hint.fecha}.${contexto}\nMensaje: ${transcript}`;
+  const contexto = recientes
+    ? `\nComidas recientes (contexto, con modo/calificación/notas):\n${recientes}`
+    : "";
+  const replyCtx = replied
+    ? `\nEl usuario está RESPONDIENDO a este registro ya guardado (casi siempre lo quiere editar):\n${replied}`
+    : "";
+  const system = SYSTEM_PROMPT;
+  const userContent = `Ahora es ${now} (Argentina).\n${hintTexto}${contexto}${replyCtx}\nMensaje: ${transcript}`;
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },

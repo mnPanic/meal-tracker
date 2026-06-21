@@ -13,6 +13,18 @@ import {
   type SheetEntry,
 } from "./sheets";
 import { downloadFile, getFilePath } from "./telegram";
+import {
+  comidaHintAt,
+  diff,
+  escapeHtml,
+  formatRecientes,
+  isSavedMeal,
+  parseRow,
+  parseSummary,
+  prevISO,
+  summary,
+  type Hint,
+} from "./logic";
 
 type Bindings = {
   TELEGRAM_BOT_TOKEN: string;
@@ -48,45 +60,13 @@ function nowBA(): string {
   return `${date} ${time} (${weekday})`;
 }
 
-const ORDEN = ["Desayuno", "Almuerzo", "Merienda", "Cena"];
-
-// Yesterday's ISO date relative to a YYYY-MM-DD date.
-function prevISO(fecha: string): string {
-  const [y, m, d] = fecha.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
-}
-
-// HINT (fecha + comida) para el agente, según la hora de Buenos Aires.
-// Antes de las 06 => Cena del día anterior. De día, la hora da un "techo" (la comida más
-// tardía plausible) y, como las comidas se cargan en orden, el hint es la PRIMERA comida
-// faltante hoy hasta ese techo (ej: 18h con Almuerzo sin cargar => Almuerzo, no Merienda).
-// `hoy` son las comidas ya cargadas hoy (tab Comidas).
-function comidaHint(hoy: SheetEntry[]): { fecha: string; comida: string } {
-  const h = Number(
+// Thin wrapper over comidaHintAt that reads the current BA hour/date. The pure logic lives
+// in logic.ts so it can be unit-tested deterministically.
+function comidaHint(hoy: SheetEntry[], ayer: SheetEntry[]): Hint {
+  const hora = Number(
     new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", hour12: false }).format(new Date()),
   );
-  if (h < 6) return { fecha: prevISO(todayISO()), comida: "Cena" };
-  let techo = 0; // Desayuno
-  if (h >= 19) techo = 3;
-  else if (h >= 16) techo = 2;
-  else if (h >= 12) techo = 1;
-  const cargadas = new Set(hoy.map((e) => e.comida));
-  // Primera comida OBLIGATORIA faltante hasta el techo (la merienda, índice 2, es opcional y
-  // no cuenta como faltante). Si no falta ninguna, usar la comida del techo.
-  const idx = ORDEN.slice(0, techo + 1).findIndex((c, i) => i !== 2 && !cargadas.has(c));
-  return { fecha: todayISO(), comida: ORDEN[idx === -1 ? techo : idx] };
-}
-
-// Compact block of recent meals (one line per day) to give the model context.
-function formatRecientes(days: { fecha: string; entries: SheetEntry[] }[]): string {
-  return days
-    .map(({ fecha, entries }) => {
-      const items = entries.length
-        ? entries.map((e) => `${e.comida}: ${e.notas}`).join("; ")
-        : "(sin registros)";
-      return `${fecha}: ${items}`;
-    })
-    .join("\n");
+  return comidaHintAt(hoy, ayer, hora, todayISO());
 }
 
 function sheetClient(env: Bindings): SheetClient {
@@ -138,17 +118,6 @@ function answerCallback(token: string, callbackId: string): Promise<void> {
   return tg(token, "answerCallbackQuery", { callback_query_id: callbackId });
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-// LOAD-BEARING FORMAT: parseSummary re-parses this exact layout from proposal messages to
-// recover the entry on accept (stateless). Keep fecha/comida/modo/calificacion on line 1 and
-// notas on its own line; don't reorder without updating parseSummary.
-function summary(entry: MealEntry): string {
-  return `📅 ${entry.fecha} · 🍽️ ${entry.comida} · 📍 ${entry.modo} · ⭐ ${entry.calificacion}\n📝 ${entry.notas}`;
-}
-
 // Lines shown when an entry is incomplete/ambiguous (asks the user to confirm).
 function askLines(entry: MealEntry): string[] {
   const v = (x: string) => (x ? x : "❓ no está claro");
@@ -165,44 +134,10 @@ function askLines(entry: MealEntry): string[] {
   ];
 }
 
-// Recover the entry from a message built with summary(). Returns null if it doesn't match.
-// The header line and the notas line must be adjacent (summary()'s exact layout), so a diff
-// block above it — whose lines look like "📝 viejo → nuevo" — can't be mistaken for it.
-function parseSummary(text: string): MealEntry | null {
-  const m = text.match(/📅 (\S+) · 🍽️ (\S+) · 📍 (\S+) · ⭐ (\S+)\n📝 ([^\n]*)/);
-  if (!m) return null;
-  return { fecha: m[1], comida: m[2], modo: m[3], calificacion: m[4], notas: m[5].trim(), aclaraciones: [] };
-}
-
-// LOAD-BEARING FORMAT: parseRow recovers the row from this footer. Keep "op · fila N".
-// Visible (not collapsed) sheet action; goes above the collapsed LLM context.
+// Visible (not collapsed) sheet action footer; goes above the collapsed LLM context.
+// LOAD-BEARING FORMAT: parseRow recovers the row from "op · fila N".
 function tech(op: string, row: number): string {
   return `\nacciones: <code>${op} · fila ${row}</code>`;
-}
-
-function parseRow(text: string): number | null {
-  const m = text.match(/(?:append|overwrite) · fila (\d+)/);
-  return m ? Number(m[1]) : null;
-}
-
-// A saved-meal message carries a date line and a "fila N" footer; lets a reply target its row.
-function isSavedMeal(text: string): boolean {
-  return /📅 \d{4}-\d{2}-\d{2}/.test(text) && parseRow(text) !== null;
-}
-
-// Lines for the fields that change between the saved entry and the proposal.
-function diff(base: MealEntry, prop: MealEntry): string {
-  const rows: [string, string, string][] = [
-    ["📅", base.fecha, prop.fecha],
-    ["🍽️", base.comida, prop.comida],
-    ["📍", base.modo, prop.modo],
-    ["⭐", base.calificacion, prop.calificacion],
-    ["📝", base.notas, prop.notas],
-  ];
-  const changed = rows
-    .filter(([, a, b]) => a !== b)
-    .map(([e, a, b]) => `${e} ${a || "—"} → <b>${b || "—"}</b>`);
-  return changed.length ? changed.join("\n") : "(sin cambios)";
 }
 
 // --- Cierres de ciclo (recaps) ---
@@ -284,14 +219,15 @@ async function messageText(env: Bindings, msg: TgMessage): Promise<{ text: strin
   return { text: await transcribe(env.OPENAI_API_KEY, audio), voice: true };
 }
 
-// Inner text echoing what we transcribed from a voice note (empty for plain text).
-function transcriptNote(userText: string, voice: boolean): string {
-  return voice ? `🎤 ${escapeHtml(userText)}` : "";
+// Inner text echoing the ORIGINAL user message (a transcript for voice, the text otherwise).
+// Always shown so any saved/proposed message can be replied to with full context.
+function mensajeNote(userText: string, voice: boolean): string {
+  return `${voice ? "🎤 transcript" : "💬 mensaje"}: ${escapeHtml(userText)}`;
 }
 
-// Inner text showing the context fed to the model (hint + recent meals), for debugging.
-function ctxNote(hint: { fecha: string; comida: string }, recientes: string): string {
-  const lines = [`hint: ${hint.comida} ${hint.fecha}`];
+// Inner text showing the context fed to the model (pending-meals hint + recent meals), for debugging.
+function ctxNote(hintTexto: string, recientes: string): string {
+  const lines = [`hint: ${hintTexto}`];
   if (recientes) lines.push("recientes:", recientes);
   return escapeHtml(lines.join("\n"));
 }
@@ -358,49 +294,35 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     await reply(token, msg.chat.id, "Mandame un texto o una nota de voz describiendo la comida 📝🎤");
     return;
   }
-  const note = transcriptNote(userText, voice);
+  const note = mensajeNote(userText, voice);
+  const client = sheetClient(env);
 
   const now = nowBA();
   const today = todayISO();
   const yesterday = prevISO(today);
-  const [hoyEntries, ayerEntries] = await Promise.all([
-    readDay(sheetClient(env), today),
-    readDay(sheetClient(env), yesterday),
-  ]);
-  const hint = comidaHint(hoyEntries);
+  const [hoyEntries, ayerEntries] = await Promise.all([readDay(client, today), readDay(client, yesterday)]);
+  const hint = comidaHint(hoyEntries, ayerEntries);
   const recientes = formatRecientes([
     { fecha: yesterday, entries: ayerEntries },
     { fecha: today, entries: hoyEntries },
   ]);
-  const ctx = ctxNote(hint, recientes);
+  const ctx = ctxNote(hint.texto, recientes);
 
-  // Reply to a saved-meal message? → treat the text as a correction of that row, with the
-  // saved entry as context. Emit a proposal to accept/reject (does not write yet).
+  // Replying to a saved-meal message is just strong context now (not a forced edit): we hand
+  // that record to the model, and it decides agregar vs editar like for any other message.
   const repliedText = msg.reply_to_message?.text;
-  if (repliedText && isSavedMeal(repliedText)) {
-    const row = parseRow(repliedText);
-    const fecha = parseSummary(repliedText)?.fecha;
-    const base = row && fecha ? (await readDay(sheetClient(env), fecha)).find((e) => e.row === row) : undefined;
-    if (!row || !fecha || !base) {
-      await reply(token, msg.chat.id, "No pude releer ese registro para editarlo (¿fuera de la ventana de 7 días?).");
-      return;
-    }
-    const baseEntry: MealEntry = { fecha, comida: base.comida, modo: base.modo, calificacion: base.calificacion, notas: base.notas, aclaraciones: [] };
-    const prop = await extract(env.OPENAI_API_KEY, userText, now, hint, recientes, baseEntry);
-    if (prop.aclaraciones.length > 0) {
-      await reply(token, msg.chat.id, askLines(prop).join("\n") + llmFooter(note));
-      return;
-    }
-    await reply(
-      token,
-      msg.chat.id,
-      `✏️ <b>Propuesta de edición</b> (fila ${row})\n${diff(baseEntry, prop)}\n\n${summary(prop)}${tech("overwrite", row)}${llmFooter(note)}`,
-      { keyboard: proposalKeyboard(row), replyTo: msg.message_id },
-    );
-    return;
-  }
+  const repliedSaved = repliedText && isSavedMeal(repliedText);
+  const repliedEntry = repliedSaved ? parseSummary(repliedText) : null;
+  const repliedRow = repliedSaved ? parseRow(repliedText) : null;
 
-  const entry = await extract(env.OPENAI_API_KEY, userText, now, hint, recientes);
+  const entry = await extract(
+    env.OPENAI_API_KEY,
+    userText,
+    now,
+    hint.texto,
+    recientes,
+    repliedEntry ? summary(repliedEntry) : "",
+  );
 
   // Incomplete or ambiguous → ask, do NOT save.
   if (entry.aclaraciones.length > 0 || !entry.comida || !entry.modo || !entry.calificacion) {
@@ -408,30 +330,41 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     return;
   }
 
-  // Read-before-write: is there already an entry for this Comida on the target date?
-  const existing = (await readDay(sheetClient(env), entry.fecha)).find((e) => e.comida === entry.comida);
+  // Locate the row this would touch. A reply targets its exact row (handles a comida change);
+  // otherwise we match the same comida already logged that date. If the model chose "agregar"
+  // we still only treat a same-comida match as a collision (don't redirect a reply's row).
+  const dayEntries = await readDay(client, entry.fecha);
+  const byMatch = dayEntries.find((e) => e.comida === entry.comida);
+  const byReply = repliedRow ? dayEntries.find((e) => e.row === repliedRow) : undefined;
+  const target = entry.accion === "editar" ? (byReply ?? byMatch) : byMatch;
 
-  if (existing) {
-    // Don't decide silently — propose a replacement to accept/reject (same mechanism as edits).
-    const existingEntry: MealEntry = {
+  // Edit, or a new meal that collides with an existing one → propose an overwrite to
+  // accept/reject (never write silently). Both are "overwrite"; only clean appends auto-save.
+  if (target) {
+    const baseEntry: MealEntry = {
       fecha: entry.fecha,
-      comida: existing.comida,
-      modo: existing.modo,
-      calificacion: existing.calificacion,
-      notas: existing.notas,
+      comida: target.comida,
+      modo: target.modo,
+      calificacion: target.calificacion,
+      notas: target.notas,
       aclaraciones: [],
+      accion: "editar",
     };
+    const titulo =
+      entry.accion === "editar"
+        ? `✏️ <b>Propuesta de edición</b> (fila ${target.row})`
+        : `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}. Propuesta de reemplazo:`;
     await reply(
       token,
       msg.chat.id,
-      `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}. Propuesta de reemplazo:\n${diff(existingEntry, entry)}\n\n${summary(entry)}${tech("overwrite", existing.row)}${llmFooter(note)}`,
-      { keyboard: proposalKeyboard(existing.row), replyTo: msg.message_id },
+      `${titulo}\n${diff(baseEntry, entry)}\n\n${summary(entry)}${tech("overwrite", target.row)}${llmFooter(note, ctx)}`,
+      { keyboard: proposalKeyboard(target.row), replyTo: msg.message_id },
     );
     return;
   }
 
-  // No collision → save directly (new meals don't need accept/reject).
-  const row = await append(sheetClient(env), entry);
+  // No target → save directly (new meals don't need accept/reject).
+  const row = await append(client, entry);
   await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${tech("append", row)}${llmFooter(note, ctx)}`);
 
   // Si la Cena cierra el día (y quizá semana/mes), mandar los recaps.
