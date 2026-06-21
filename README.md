@@ -89,6 +89,9 @@ Las views (diario/semanal/mensual) se leen pero no se escriben.
 
 ## Deploy
 
+> Operación del día a día (deploy, logs, rotar secrets, redeploy del Apps Script,
+> troubleshooting): ver [`OPERATIONS.md`](OPERATIONS.md).
+
 ```bash
 npm install
 npx wrangler deploy
