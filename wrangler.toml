@@ -1,0 +1,12 @@
+name = "meal-tracker"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Secrets (set with `wrangler secret put <NAME>`), do NOT commit:
+#   TELEGRAM_BOT_TOKEN     - from @BotFather
+#   TELEGRAM_WEBHOOK_SECRET - random string; validated on every webhook call
+#   OPENAI_API_KEY         - from platform.openai.com
+#   SHEETS_WEBAPP_URL      - the Apps Script web app /exec URL
+#   SHEETS_API_SECRET      - shared secret; must match the script's API_SECRET property
+#   ALLOWED_CHAT_ID        - your Telegram chat id (locks the bot to you)
