@@ -175,8 +175,9 @@ function parseSummary(text: string): MealEntry | null {
 }
 
 // LOAD-BEARING FORMAT: parseRow recovers the row from this footer. Keep "op · fila N".
+// Returns inner text only; wrap it with techFooter() to render it collapsed.
 function tech(op: string, row: number): string {
-  return `\n<code>${op} · fila ${row}</code>`;
+  return `${op} · fila ${row}`;
 }
 
 function parseRow(text: string): number | null {
@@ -283,16 +284,23 @@ async function messageText(env: Bindings, msg: TgMessage): Promise<{ text: strin
   return { text: await transcribe(env.OPENAI_API_KEY, audio), voice: true };
 }
 
-// Dev footer echoing what we transcribed from a voice note (empty for plain text).
+// Inner text echoing what we transcribed from a voice note (empty for plain text).
 function transcriptNote(userText: string, voice: boolean): string {
-  return voice ? `\n<code>🎤 ${escapeHtml(userText)}</code>` : "";
+  return voice ? `🎤 ${escapeHtml(userText)}` : "";
 }
 
-// Dev footer showing the context fed to the model (hint + recent meals), for debugging.
+// Inner text showing the context fed to the model (hint + recent meals), for debugging.
 function ctxNote(hint: { fecha: string; comida: string }, recientes: string): string {
   const lines = [`🧩 hint: ${hint.comida} ${hint.fecha}`];
   if (recientes) lines.push("recientes:", recientes);
-  return `\n<code>${escapeHtml(lines.join("\n"))}</code>`;
+  return escapeHtml(lines.join("\n"));
+}
+
+// Wrap the technical bits (transcript, context, sheet op) in one expandable blockquote so
+// they show collapsed by default. Skips empty parts; returns "" if nothing to show.
+function techFooter(...parts: string[]): string {
+  const body = parts.filter(Boolean).join("\n");
+  return body ? `\n<blockquote expandable>${body}</blockquote>` : "";
 }
 
 // Proposal buttons. Accept carries the target row; the proposed entry is re-parsed from the
@@ -378,13 +386,13 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     const baseEntry: MealEntry = { fecha, comida: base.comida, modo: base.modo, calificacion: base.calificacion, notas: base.notas, aclaraciones: [] };
     const prop = await extract(env.OPENAI_API_KEY, userText, now, hint, recientes, baseEntry);
     if (prop.aclaraciones.length > 0) {
-      await reply(token, msg.chat.id, askLines(prop).join("\n") + note);
+      await reply(token, msg.chat.id, askLines(prop).join("\n") + techFooter(note));
       return;
     }
     await reply(
       token,
       msg.chat.id,
-      `✏️ <b>Propuesta de edición</b> (fila ${row})\n${diff(baseEntry, prop)}\n\n${summary(prop)}${note}${tech("overwrite", row)}`,
+      `✏️ <b>Propuesta de edición</b> (fila ${row})\n${diff(baseEntry, prop)}\n\n${summary(prop)}${techFooter(note, tech("overwrite", row))}`,
       { keyboard: proposalKeyboard(row), replyTo: msg.message_id },
     );
     return;
@@ -394,7 +402,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
 
   // Incomplete or ambiguous → ask, do NOT save.
   if (entry.aclaraciones.length > 0 || !entry.comida || !entry.modo || !entry.calificacion) {
-    await reply(token, msg.chat.id, askLines(entry).join("\n") + note + ctx);
+    await reply(token, msg.chat.id, askLines(entry).join("\n") + techFooter(note, ctx));
     return;
   }
 
@@ -414,7 +422,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     await reply(
       token,
       msg.chat.id,
-      `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}. Propuesta de reemplazo:\n${diff(existingEntry, entry)}\n\n${summary(entry)}${note}${tech("overwrite", existing.row)}`,
+      `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}. Propuesta de reemplazo:\n${diff(existingEntry, entry)}\n\n${summary(entry)}${techFooter(note, tech("overwrite", existing.row))}`,
       { keyboard: proposalKeyboard(existing.row), replyTo: msg.message_id },
     );
     return;
@@ -422,7 +430,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
 
   // No collision → save directly (new meals don't need accept/reject).
   const row = await append(sheetClient(env), entry);
-  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${note}${ctx}${tech("append", row)}`);
+  await reply(token, msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${techFooter(note, ctx, tech("append", row))}`);
 
   // Si la Cena cierra el día (y quizá semana/mes), mandar los recaps.
   if (entry.comida === "Cena") {
@@ -453,7 +461,7 @@ async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {
     }
     await overwrite(sheetClient(env), row, prop);
     await dropButtons(token, chatId, messageId);
-    await reply(token, chatId, `✅ <b>Aplicado</b>\n${summary(prop)}${tech("overwrite", row)}`, { replyTo: messageId });
+    await reply(token, chatId, `✅ <b>Aplicado</b>\n${summary(prop)}${techFooter(tech("overwrite", row))}`, { replyTo: messageId });
 
     // Si la edición deja una Cena, recalcular los recaps del ciclo.
     if (prop.comida === "Cena") {
