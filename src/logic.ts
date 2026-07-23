@@ -28,9 +28,18 @@ export interface Hint {
 export function comidaHintAt(hoy: SheetEntry[], ayer: SheetEntry[], hora: number, today: string): Hint {
   const yest = prevISO(today);
 
-  // Madrugada (antes de las 6): seguís en el día anterior; lo más probable es la Cena de ayer.
+  // Madrugada (antes de las 6): el usuario todavía considera que está en el día anterior
+  // hasta que se va a dormir. Esto afecta tanto la fecha por defecto como la palabra "hoy";
+  // Cena sigue siendo solo la comida más probable cuando el mensaje no nombra una.
   if (hora < 6) {
-    return { fecha: yest, comida: "Cena", texto: `Es de madrugada: probablemente la Cena del ${yest}.` };
+    return {
+      fecha: yest,
+      comida: "Cena",
+      texto:
+        `Es de madrugada y el día conversacional sigue siendo ${yest} hasta que el usuario se vaya a dormir: ` +
+        `"hoy" y la ausencia de fecha significan ${yest}. La comida más probable, solo si el mensaje no nombra una, ` +
+        `es la Cena del ${yest}. La Merienda es la única comida opcional; Desayuno, Almuerzo y Cena son obligatorias.`,
+    };
   }
 
   // Techo: la comida más tardía plausible según la hora.
@@ -53,7 +62,7 @@ export function comidaHintAt(hoy: SheetEntry[], ayer: SheetEntry[], hora: number
     ? pendientes.map((p) => `${p.comida} del ${p.fecha}`).join(", ")
     : "ninguna (todas las obligatorias ya están cargadas)";
   const texto =
-    `Pendientes en orden: ${lista}. La Merienda es opcional. ` +
+    `Pendientes en orden: ${lista}. La Merienda es la única comida opcional; Desayuno, Almuerzo y Cena son obligatorias. ` +
     `Lo más probable, salvo que el mensaje diga otra cosa, es la ${probable.comida} del ${probable.fecha}.`;
   return { fecha: probable.fecha, comida: probable.comida, texto };
 }

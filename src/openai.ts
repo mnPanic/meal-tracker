@@ -30,18 +30,48 @@ export async function transcribe(apiKey: string, audio: ArrayBuffer): Promise<st
 
 const SYSTEM_PROMPT = `Extraés registros de comidas a partir de un mensaje en español argentino.
 
-FECHA: el usuario te da la fecha y hora actual (zona Argentina). Por defecto la comida es de HOY.
-Pero si el mensaje menciona otra fecha, RESOLVELA relativa al ahora y usá esa:
+FECHA: el usuario te da la fecha y hora actual (zona Argentina) y una guía que indica cuál es el
+DÍA CONVERSACIONAL. Por defecto, la comida pertenece a ese día conversacional.
+- Entre las 00:00 y las 05:59, el usuario considera que todavía está en el día calendario anterior
+  hasta irse a dormir. En esa franja, tanto "hoy" como la ausencia de fecha significan el día
+  anterior indicado por la guía, NO la fecha calendario del reloj.
+- Solo cambiá al nuevo día calendario durante la madrugada si el mensaje dice explícitamente que
+  ya durmió, se despertó o comenzó el nuevo día, o si da una fecha inequívoca.
+Si el mensaje menciona otra fecha fuera de esa regla, RESOLVELA relativa al día calendario y usá esa:
 - "ayer" = el día anterior; "anteayer" = dos días antes; "el lunes/martes..." = ese día de la
   semana más reciente ya pasado; "el 12" o "12/06" = esa fecha del mes actual.
-Devolvé "fecha" siempre en formato YYYY-MM-DD. Si no se menciona ninguna fecha, usá hoy.
+Devolvé "fecha" siempre en formato YYYY-MM-DD.
 
 HORA / PENDIENTES: junto al ahora recibís una lista determinística de comidas PENDIENTES (en
 orden) calculada a partir de la hora de Argentina y de lo ya cargado, con la más probable
-marcada. Es solo una guía: usala cuando el mensaje no diga otra cosa, pero GANA SIEMPRE lo que
-el mensaje menciona o implica explícitamente (comida y/o fecha; resolvé las fechas relativas
-como se indica arriba). Si el mensaje nombra una comida (ej: "desayuné"), usá ESA aunque la guía
-sugiera otra. Si el mensaje es de otra fecha y la comida no está clara, preguntala.
+marcada. La FECHA conversacional indicada por la guía es vinculante para "hoy" y para mensajes sin
+fecha; la COMIDA probable es solo una sugerencia. Si el mensaje nombra una comida (ej:
+"almorcé" o "merendé"), usá ESA aunque la guía sugiera Cena. Si el mensaje da una fecha explícita
+inequívoca, esa fecha sí gana. Si el mensaje es de otra fecha y la comida no está clara, preguntala.
+La hora actual NO significa que esté cargando la comida correspondiente a esa hora: el usuario
+puede haberse colgado y cargar varias comidas atrasadas juntas. Ante cualquier duda, gana la comida
+que el usuario nombra; si no nombra ninguna, elegí la pendiente más antigua de la lista, no la más
+cercana a la hora actual.
+
+ORDEN DE CARGA: el usuario cuenta y carga sus comidas en orden cronológico. Usá las comidas
+recientes para respetar esa secuencia. Una comida nueva normalmente va después de la última
+cargada según Desayuno → Almuerzo → Merienda → Cena; después de Cena continúa Desayuno del día
+siguiente. MERIENDA ES LA ÚNICA COMIDA OPCIONAL: puede omitirse sin que haya un registro faltante.
+Desayuno, Almuerzo y Cena son obligatorias. No retrocedas ni saltes de fecha solo por la hora del
+reloj. Esta regla ayuda a desambiguar: nunca reemplaza una comida o fecha que el mensaje indique
+inequívocamente, ni aplica a una corrección explícita de un registro anterior.
+
+CARGA EN TANDA: es normal que mande varios mensajes seguidos para ponerse al día. Interpretá cada
+nuevo mensaje como la siguiente comida de la secuencia de las comidas recientes, salvo que nombre
+inequívocamente otra comida o que esté corrigiendo un registro anterior. Por ejemplo, si son las
+21:00 y faltan Almuerzo y Cena, un mensaje sin nombre de comida corresponde primero a Almuerzo;
+la hora de Cena no autoriza a saltearlo.
+
+EJEMPLOS DE MADRUGADA: si ahora es 2026-07-23 02:00 y la guía fija el día conversacional en
+2026-07-22:
+- "Voy a almorzar..." → fecha 2026-07-22, comida Almuerzo.
+- "Hoy merendé..." → fecha 2026-07-22, comida Merienda.
+- "Ya dormí, me desperté y desayuné..." → fecha 2026-07-23, comida Desayuno.
 
 CONTEXTO: recibís un resumen de las comidas recientes (últimos días) con su modo, calificación y
 notas. Usalo para entender el mensaje, desambiguar y —cuando estés EDITANDO— recuperar los

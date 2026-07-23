@@ -63,9 +63,15 @@ original (`💬`/`🎤`) más el hint y las comidas recientes que se le pasaron 
 - **`Score`** (columna E) es **fórmula del sheet**: `SWITCH(Modo) + SWITCH(Calificacion)`, rango 0–5.
   El bot nunca lo setea; el Apps Script reescribe la fórmula por fila (con `;`, locale español).
 - **`Notas`**: formato `{lugar|evento} - plato`. Casa = solo el plato; Delivery/Afuera = lugar + plato.
-- **`Fecha`**: hoy por defecto (`America/Argentina/Buenos_Aires`), pero si el mensaje menciona otra
-  fecha ("ayer", "el lunes", "12/06") OpenAI la resuelve y se usa esa. Se le pasa fecha+hora actual
-  al modelo para inferir la comida (horarios típicos: desayuno 06–11, almuerzo 12–15, etc.).
+- **`Fecha`**: usa el día conversacional del usuario. Entre 00:00 y 05:59, `"hoy"` y la ausencia
+  de fecha todavía significan el día calendario anterior (hasta dormir), salvo que el mensaje
+  indique explícitamente que ya empezó el nuevo día. El usuario carga las comidas en orden
+  `Desayuno → Almuerzo → Merienda → Cena`; el contexto reciente ayuda a conservar esa secuencia.
+  **Merienda es la única comida opcional**; Desayuno, Almuerzo y Cena son obligatorias. Fechas
+  explícitas como `"ayer"`, `"el lunes"` o `"12/06"` se resuelven aparte.
+- **Carga atrasada**: el usuario puede ponerse al día cargando varias comidas juntas y en secuencia.
+  La comida nombrada en el mensaje siempre gana sobre la hora. Si no nombra ninguna, se elige la
+  pendiente obligatoria más antigua, aunque el horario actual corresponda a una comida posterior.
 
 ### Garantías del backend (Apps Script)
 

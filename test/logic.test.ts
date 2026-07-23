@@ -46,6 +46,9 @@ describe("comidaHintAt", () => {
   it("madrugada → Cena del día anterior", () => {
     const h = comidaHintAt([], [], 3, today);
     expect(h).toMatchObject({ fecha: "2026-06-20", comida: "Cena" });
+    expect(h.texto).toContain('"hoy" y la ausencia de fecha significan 2026-06-20');
+    expect(h.texto).toContain("solo si el mensaje no nombra una");
+    expect(h.texto).toContain("Merienda es la única comida opcional");
   });
 
   it("explicit-meal bug case: yesterday's Cena missing shows up as pending", () => {
@@ -65,7 +68,14 @@ describe("comidaHintAt", () => {
     expect(h).toMatchObject({ comida: "Almuerzo", fecha: today });
     expect(h.texto).toContain("Almuerzo del 2026-06-21");
     expect(h.texto).not.toContain("Merienda del"); // optional, not listed as pending
-    expect(h.texto).toContain("La Merienda es opcional");
+    expect(h.texto).toContain("La Merienda es la única comida opcional");
+  });
+
+  it("at dinner time still points to the oldest pending meal", () => {
+    const ayer = ORDEN_FULL.map((c) => sheet(c));
+    const h = comidaHintAt([sheet("Desayuno")], ayer, 21, today);
+    expect(h).toMatchObject({ comida: "Almuerzo", fecha: today });
+    expect(h.texto).toContain(`Almuerzo del ${today}, Cena del ${today}`);
   });
 
   it("nothing pending → points at the ceiling meal", () => {
