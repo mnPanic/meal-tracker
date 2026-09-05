@@ -89,30 +89,36 @@ Campos:
 - comida: cuál de las 4 comidas del día (Desayuno | Almuerzo | Merienda | Cena).
 - modo: de dónde salió la comida (Casa | Delivery | Afuera).
 - calificacion: calidad NUTRICIONAL de la comida (OK | Mid | Bad), es decir qué tan saludable es,
-  NO cuánto le gustó a la persona. Una pizza o fritura rica es nutricionalmente Bad; una comida
-  balanceada con verduras y proteína es OK; algo intermedio es Mid. Juzgá por el alimento en sí,
-  ignorando si dijo que estaba rico o no.
+  NO cuánto le gustó a la persona. Conservá la calificación que indica el usuario; si falta,
+  preguntala, no la inventes a partir del plato.
 - notas: descripción de la comida en estilo telegráfico (sin verbos como "comí/cené"), conciso
   pero sin dejar detalles afuera (no descartes ingredientes ni cantidades que se mencionen).
   No repitas el modo (Casa/Delivery/Afuera) en las notas, ya va en su propio campo.
   Las notas van SIEMPRE en una sola línea (sin saltos de línea).
 
-FORMATO DE NOTAS: "{lugar|evento} - plato". Es decir, si hay un lugar o un evento, va como prefijo
-seguido de " - " y después el plato. Reglas:
+FORMATO DE NOTAS: incluí únicamente los detalles mencionados. Lugar, evento, plato, ingredientes
+y cantidades son OPCIONALES. Si hay lugar/evento y plato, usá "{lugar|evento} - plato".
+Si solo hay uno, escribí solo ese dato, sin guiones vacíos. Si no hay detalles, notas = "". Reglas:
 - modo Casa: normalmente NO hay lugar; las notas son solo el plato (ej: "Yoghurt con chía y granola",
   "Milanesa de soja con arroz"). Si hay un evento/contexto social, usalo de prefijo
   (ej: "Cumple de Nico - picada y pizza").
-- modo Delivery o Afuera: SE ESPERA el nombre del lugar/local como prefijo
+- modo Delivery o Afuera: si se menciona el lugar/local, usalo como prefijo cuando también haya plato
   (ej: "Audaz - milanesa de pollo con ensalada", "La Cabrera - mila napo con papas", "Daiki - sushi").
 - Estilo: español argentino, conciso pero completo, items separados por coma o "con".
 
-REGLA IMPORTANTE: NO inventes ni infieras datos. Si un campo no está claro o no se menciona,
-dejalo como cadena vacía "" y agregá una entrada en "aclaraciones" explicándole al usuario qué
-falta o qué no está claro, sugiriendo opciones cuando tenga sentido. Ejemplo de aclaración:
-"No me queda claro el modo: ¿fue en Casa, Delivery o Afuera?". Escribí las aclaraciones en español.
-EN PARTICULAR: si el modo es Delivery o Afuera y no se menciona el lugar, NO lo inventes: dejá las
-notas con el plato pero agregá una aclaración pidiendo el lugar (ej: "¿De qué lugar fue el delivery?").
-Si todos los campos están claros, "aclaraciones" debe ser una lista vacía.`;
+DATOS OBLIGATORIOS: solo modo y calificación requieren que el usuario los aporte (en el mensaje
+o en el contexto del registro que está completando/editando). Si falta alguno, dejalo en "" y
+preguntalo en "aclaraciones", en español. Fecha y comida se resuelven con el mensaje y la secuencia;
+si no se puede identificar el registro o hay un hueco obligatorio, reportá ese problema.
+No pidas lugar, plato ni detalles de notas: su ausencia no bloquea guardar, desde el primer mensaje,
+sin necesidad de que el usuario responda "irrelevante" o "no importa". No agregues avisos como
+"el lugar queda sin especificar" a aclaraciones: esa lista es solo para preguntas o errores
+que realmente impiden guardar. Si modo, calificación y la ubicación en la secuencia están resueltos,
+aclaraciones = [], aunque notas esté vacío. Nunca inventes los datos omitidos.
+Ejemplos con fecha/comida resueltas y sin huecos:
+- "delivery mid pizza" → modo Delivery, calificacion Mid, notas "pizza", aclaraciones [].
+- "el 2/9 almorcé delivery ok, lugar cilantro" → notas "Cilantro", aclaraciones []; no preguntes plato.
+- "casa ok" → modo Casa, calificacion OK, notas "", aclaraciones [].`;
 
 const SCHEMA = {
   type: "object",
@@ -122,12 +128,12 @@ const SCHEMA = {
     comida: { type: "string", description: "Desayuno|Almuerzo|Merienda|Cena, o \"\" si no está claro" },
     modo: { type: "string", description: "Casa|Delivery|Afuera, o \"\" si no está claro" },
     calificacion: { type: "string", description: "OK|Mid|Bad (calidad nutricional), o \"\" si no está claro" },
-    notas: { type: "string", description: "estilo '{lugar|evento} - plato'; lugar esperado en Delivery/Afuera" },
+    notas: { type: "string", description: "Detalles opcionales mencionados, sin inventar ni pedir faltantes; vacío si no hay detalles. Separador ' - ' solo si hay lugar/evento y plato." },
     accion: { type: "string", enum: ["agregar", "editar"], description: "agregar = comida nueva; editar = corrección de una ya registrada ese día" },
     aclaraciones: {
       type: "array",
       items: { type: "string" },
-      description: "preguntas/aclaraciones para el usuario por cada campo que no esté claro; vacío si todo claro",
+      description: "Solo modo/calificación faltantes o problemas para identificar el registro o mantener la secuencia. Nunca preguntar por lugar, plato o notas; [] si se puede guardar.",
     },
   },
   required: ["fecha", "comida", "modo", "calificacion", "notas", "accion", "aclaraciones"],
@@ -135,7 +141,7 @@ const SCHEMA = {
 
 // `now` is a human-readable BA datetime with weekday, e.g. "2026-06-15 14:30 (domingo)".
 // `recientes` is the meal table, including pending and skipped slots.
-// `replied` (when set) is the saved record the user is replying to; the model usually edits it.
+// `replied` is the full text of the message the user is replying to.
 export async function extract(
   apiKey: string,
   transcript: string,
@@ -147,7 +153,7 @@ export async function extract(
     ? `\nComidas recientes (contexto, con modo/calificación/notas):\n${recientes}`
     : "";
   const replyCtx = replied
-    ? `\nEl usuario está RESPONDIENDO a este registro ya guardado (casi siempre lo quiere editar):\n${replied}`
+    ? `\nMensaje completo al que el usuario está RESPONDIENDO (contexto previo, puede ser una aclaración o un registro guardado; no implica que ya esté guardado). Conservá los datos ya entendidos salvo que el mensaje actual los corrija. La tabla actual prevalece sobre cualquier tabla histórica incluida en este mensaje:\n${replied}\nFin del mensaje respondido.\n`
     : "";
   const system = SYSTEM_PROMPT;
   const userContent = `Ahora es ${now} (Argentina).${contexto}${replyCtx}\nMensaje: ${transcript}`;

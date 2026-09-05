@@ -304,11 +304,10 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   const recientes = formatRecientes(dias);
   const ctx = escapeHtml(recientes);
 
-  // Replying to a saved-meal message is just strong context now (not a forced edit): we hand
-  // that record to the model, and it decides agregar vs editar like for any other message.
+  // Every reply supplies the full message as context, including clarification questions.
+  // Saved messages additionally identify the row an edit should target.
   const repliedText = msg.reply_to_message?.text;
   const repliedSaved = repliedText && isSavedMeal(repliedText);
-  const repliedEntry = repliedSaved ? parseSummary(repliedText) : null;
   const repliedRow = repliedSaved ? parseRow(repliedText) : null;
 
   const entry = await extract(
@@ -316,7 +315,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     userText,
     now,
     recientes,
-    repliedEntry ? summary(repliedEntry) : "",
+    repliedText ?? "",
   );
 
   // Incomplete or ambiguous → ask, do NOT save.

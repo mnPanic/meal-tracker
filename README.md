@@ -40,7 +40,9 @@ graph LR
 1. **Mensaje de texto o nota de voz** → la voz se transcribe con `transcribe()`, después
    `extract()` saca `fecha / comida / modo / calificacion / notas` + una `accion`
    (`agregar` | `editar`). Ambos caminos comparten el pipeline.
-2. **No infiere**: si falta algo o el modo es Delivery/Afuera sin lugar, **pregunta** y no guarda.
+2. **Datos obligatorios**: pregunta si falta modo o calificación. Lugar, plato y notas son opcionales:
+   si no se mencionan, se omiten sin preguntar. Fecha y comida se resuelven con el mensaje y la
+   secuencia; una ambigüedad que impida ubicar el registro o un hueco obligatorio bloquea la carga.
 3. **Read-before-write**: lee el día y ubica la fila que tocaría (misma comida, o la fila exacta si
    el mensaje responde a un registro guardado). Si hay match —edición o colisión con una comida ya
    cargada— propone un **overwrite** con botones **✅ Aceptar / ✖️ Rechazar** (la fila viaja en el
@@ -69,7 +71,8 @@ día con registros quedan fuera de la secuencia conocida.
 - **`calificacion`** (OK/Mid/Bad) = calidad **nutricional**, no cuánto gustó.
 - **`Score`** (columna E) es **fórmula del sheet**: `SWITCH(Modo) + SWITCH(Calificacion)`, rango 0–5.
   El bot nunca lo setea; el Apps Script reescribe la fórmula por fila (con `;`, locale español).
-- **`Notas`**: formato `{lugar|evento} - plato`. Casa = solo el plato; Delivery/Afuera = lugar + plato.
+- **`Notas`**: opcionales. Formato `{lugar|evento} - plato` cuando están ambos; si solo hay uno,
+  se guarda ese dato sin separador, y si no hay detalles se deja vacío.
 - **`Fecha`**: entre 00:00 y 05:59, `"hoy"` significa el día calendario anterior (hasta dormir),
   salvo que el mensaje indique explícitamente que ya empezó el nuevo día. Sin fecha explícita,
   se sigue la secuencia del contexto. El usuario carga las comidas en orden
