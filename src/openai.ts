@@ -30,53 +30,50 @@ export async function transcribe(apiKey: string, audio: ArrayBuffer): Promise<st
 
 const SYSTEM_PROMPT = `Extraés registros de comidas a partir de un mensaje en español argentino.
 
-FECHA: el usuario te da la fecha y hora actual (zona Argentina) y una guía que indica cuál es el
-DÍA CONVERSACIONAL. Por defecto, la comida pertenece a ese día conversacional.
-- Entre las 00:00 y las 05:59, el usuario considera que todavía está en el día calendario anterior
-  hasta irse a dormir. En esa franja, tanto "hoy" como la ausencia de fecha significan el día
-  anterior indicado por la guía, NO la fecha calendario del reloj.
-- Solo cambiá al nuevo día calendario durante la madrugada si el mensaje dice explícitamente que
-  ya durmió, se despertó o comenzó el nuevo día, o si da una fecha inequívoca.
-Si el mensaje menciona otra fecha fuera de esa regla, RESOLVELA relativa al día calendario y usá esa:
-- "ayer" = el día anterior; "anteayer" = dos días antes; "el lunes/martes..." = ese día de la
-  semana más reciente ya pasado; "el 12" o "12/06" = esa fecha del mes actual.
-Devolvé "fecha" siempre en formato YYYY-MM-DD.
+PRIORIDAD: lo que dice el usuario sobre fecha, comida, detalles y correcciones SIEMPRE
+prevalece sobre cualquier inferencia del contexto. Nunca reasignes una comida explícita para
+llenar un pendiente. Si esa indicación dejaría un hueco obligatorio, explicá el error en
+"aclaraciones" y pedí resolverlo; no cambies su intención para hacerla encajar.
 
-HORA / PENDIENTES: junto al ahora recibís una lista determinística de comidas PENDIENTES (en
-orden) calculada a partir de la hora de Argentina y de lo ya cargado, con la más probable
-marcada. La FECHA conversacional indicada por la guía es vinculante para "hoy" y para mensajes sin
-fecha; la COMIDA probable es solo una sugerencia. Si el mensaje nombra una comida (ej:
-"almorcé" o "merendé"), usá ESA aunque la guía sugiera Cena. Si el mensaje da una fecha explícita
-inequívoca, esa fecha sí gana. Si el mensaje es de otra fecha y la comida no está clara, preguntala.
-La hora actual NO significa que esté cargando la comida correspondiente a esa hora: el usuario
-puede haberse colgado y cargar varias comidas atrasadas juntas. Ante cualquier duda, gana la comida
-que el usuario nombra; si no nombra ninguna, elegí la pendiente más antigua de la lista, no la más
-cercana a la hora actual.
+CONTEXTO: recibís una única tabla de los últimos 7 días, ordenada de antiguo a reciente.
+Cada celda contiene el registro completo (modo/calificación/notas) o su estado:
+- Pendiente: todavía no se cargó y no hay una comida posterior registrada.
+- Pendiente (opcional): Merienda sin cargar y sin ningún registro posterior.
+- Omitida: Merienda sin cargar que tiene una comida posterior, incluso de otro día. No la pidas.
+- Sin registros previos: está antes del inicio conocido; no implica que deba rellenarse.
+Los pendientes son posiciones de la secuencia aún sin cargar, no una afirmación de que ya
+ocurrieron por la hora actual. No hay un hint ni una lista separada de pendientes.
+Usá los valores cargados para conservar campos al editar, pero no copies detalles hacia comidas nuevas.
 
-ORDEN DE CARGA: el usuario cuenta y carga sus comidas en orden cronológico. Usá las comidas
-recientes para respetar esa secuencia. Una comida nueva normalmente va después de la última
-cargada según Desayuno → Almuerzo → Merienda → Cena; después de Cena continúa Desayuno del día
-siguiente. MERIENDA ES LA ÚNICA COMIDA OPCIONAL: puede omitirse sin que haya un registro faltante.
-Desayuno, Almuerzo y Cena son obligatorias. No retrocedas ni saltes de fecha solo por la hora del
-reloj. Esta regla ayuda a desambiguar: nunca reemplaza una comida o fecha que el mensaje indique
-inequívocamente, ni aplica a una corrección explícita de un registro anterior.
+ORDEN DE CARGA: el usuario SIEMPRE carga en orden y sin agujeros:
+Desayuno → Almuerzo → Merienda → Cena → Desayuno del día siguiente.
+Desayuno, Almuerzo y Cena son obligatorias. Merienda es opcional: si el usuario indica Cena,
+puede omitir Merienda; si no especifica comida, Merienda sigue pendiente y no se saltea por defecto.
+Para mensajes sin comida/fecha, continuá desde la primera pendiente de la secuencia conocida,
+de atrás hacia adelante. No saltes días o comidas por la hora del reloj.
+Una obligatoria vacía antes de un registro posterior es un ERROR de consistencia, no un pendiente
+normal. Si la nueva carga generaría ese hueco, reportalo en "aclaraciones" y no inventes registros.
+Si no hay registros o no alcanza el contexto para identificar la comida, preguntá.
+Las correcciones explícitas pueden apuntar a registros anteriores.
 
-CARGA EN TANDA: es normal que mande varios mensajes seguidos para ponerse al día. Interpretá cada
-nuevo mensaje como la siguiente comida de la secuencia de las comidas recientes, salvo que nombre
-inequívocamente otra comida o que esté corrigiendo un registro anterior. Por ejemplo, si son las
-21:00 y faltan Almuerzo y Cena, un mensaje sin nombre de comida corresponde primero a Almuerzo;
-la hora de Cena no autoriza a saltearlo.
+FECHA: resolvé las fechas explícitas según el mensaje y el reloj de Argentina.
+- "ayer" = día calendario anterior; "anteayer" = dos días antes.
+- "el lunes/martes..." = ese día de la semana más reciente ya pasado.
+- "el 12" o "12/06" = esa fecha del mes actual.
+- Entre las 00:00 y las 05:59, "hoy" se refiere al día calendario anterior hasta irse a dormir,
+  salvo que el usuario diga que ya durmió, se despertó o comenzó el nuevo día, o dé otra fecha explícita.
+- Sin fecha explícita, seguí la secuencia de la tabla; la hora no adelanta la carga.
+Devolvé "fecha" siempre como YYYY-MM-DD.
 
-EJEMPLOS DE MADRUGADA: si ahora es 2026-07-23 02:00 y la guía fija el día conversacional en
-2026-07-22:
-- "Voy a almorzar..." → fecha 2026-07-22, comida Almuerzo.
-- "Hoy merendé..." → fecha 2026-07-22, comida Merienda.
-- "Ya dormí, me desperté y desayuné..." → fecha 2026-07-23, comida Desayuno.
-
-CONTEXTO: recibís un resumen de las comidas recientes (últimos días) con su modo, calificación y
-notas. Usalo para entender el mensaje, desambiguar y —cuando estés EDITANDO— recuperar los
-campos que el mensaje no menciona. No copies datos de ahí hacia comidas nuevas: el registro es
-sobre el mensaje actual.
+EJEMPLOS:
+- Si la última cargada es Desayuno de anteayer, un mensaje sin fecha/comida sigue con Almuerzo
+  de anteayer, aunque ahora sea la hora de cenar.
+- Si la última cargada es Almuerzo, un mensaje sin comida sigue con Merienda; "cené..." va a Cena
+  y deja Merienda omitida.
+- Si el usuario dice "hoy almorcé" y ya está cargado, editá ese Almuerzo; no lo reasignes.
+- Si falta Almuerzo y el usuario dice "cené", mantené Cena y reportá que falta Almuerzo.
+- Si ahora es 2026-07-23 02:00, "hoy merendé" es Merienda del 2026-07-22; "ya dormí y desayuné"
+  es Desayuno del 2026-07-23. Validá que la carga no deje huecos obligatorios.
 
 ACCIÓN: elegí una de dos y devolvela en "accion":
 - "agregar": es una comida NUEVA, que todavía no figura en las comidas recientes de ese día.
@@ -137,14 +134,12 @@ const SCHEMA = {
 } as const;
 
 // `now` is a human-readable BA datetime with weekday, e.g. "2026-06-15 14:30 (domingo)".
-// `hintTexto` is the deterministic pending-meals guide for the current BA hour.
-// `recientes` is an optional preformatted block with the last days' meals (with their fields).
+// `recientes` is the meal table, including pending and skipped slots.
 // `replied` (when set) is the saved record the user is replying to; the model usually edits it.
 export async function extract(
   apiKey: string,
   transcript: string,
   now: string,
-  hintTexto: string,
   recientes = "",
   replied = "",
 ): Promise<MealEntry> {
@@ -155,12 +150,12 @@ export async function extract(
     ? `\nEl usuario está RESPONDIENDO a este registro ya guardado (casi siempre lo quiere editar):\n${replied}`
     : "";
   const system = SYSTEM_PROMPT;
-  const userContent = `Ahora es ${now} (Argentina).\n${hintTexto}${contexto}${replyCtx}\nMensaje: ${transcript}`;
+  const userContent = `Ahora es ${now} (Argentina).${contexto}${replyCtx}\nMensaje: ${transcript}`;
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: "gpt-5.6-luna",
       messages: [
         { role: "system", content: system },
         { role: "user", content: userContent },

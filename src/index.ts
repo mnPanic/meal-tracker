@@ -10,11 +10,10 @@ import {
   type DiarioRow,
   type PeriodoRow,
   type SheetClient,
-  type SheetEntry,
 } from "./sheets";
 import { downloadFile, getFilePath } from "./telegram";
 import {
-  comidaHintAt,
+  validateMealWrite,
   diff,
   escapeHtml,
   formatRecientes,
@@ -23,7 +22,6 @@ import {
   parseSummary,
   prevISO,
   summary,
-  type Hint,
 } from "./logic";
 
 type Bindings = {
@@ -38,6 +36,7 @@ type Bindings = {
 };
 
 const TZ = "America/Argentina/Buenos_Aires";
+const LOOKBACK_DAYS = 7;
 
 // Today's date in Buenos Aires time as ISO YYYY-MM-DD (en-CA formats exactly that).
 function todayISO(): string {
@@ -63,13 +62,12 @@ function nowBA(): string {
   return `${date} ${time} (${weekday})`;
 }
 
-// Thin wrapper over comidaHintAt that reads the current BA hour/date. The pure logic lives
-// in logic.ts so it can be unit-tested deterministically.
-function comidaHint(hoy: SheetEntry[], ayer: SheetEntry[]): Hint {
-  const hora = Number(
-    new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", hour12: false }).format(new Date()),
-  );
-  return comidaHintAt(hoy, ayer, hora, todayISO());
+async function readContext(client: SheetClient) {
+  const fechas = [todayISO()];
+  while (fechas.length < LOOKBACK_DAYS) fechas.push(prevISO(fechas[fechas.length - 1]));
+  return Promise.all(fechas.toReversed().map(async (fecha) => ({
+    fecha, entries: await readDay(client, fecha),
+  })));
 }
 
 function sheetClient(env: Bindings): SheetClient {
@@ -228,14 +226,7 @@ function mensajeNote(userText: string, voice: boolean): string {
   return `${voice ? "🎤 transcript" : "💬 mensaje"}: ${escapeHtml(userText)}`;
 }
 
-// Inner text showing the context fed to the model (pending-meals hint + recent meals), for debugging.
-function ctxNote(hintTexto: string, recientes: string): string {
-  const lines = [`hint: ${hintTexto}`];
-  if (recientes) lines.push("recientes:", recientes);
-  return escapeHtml(lines.join("\n"));
-}
-
-// Wrap the LLM context bits (transcript + hint + recent meals) in one expandable blockquote
+// Wrap the LLM context bits (transcript + meal table) in one expandable blockquote
 // so they show collapsed by default. Only the "🧩 Contexto del LLM" header shows until
 // expanded. Skips empty parts; returns "" if nothing to show.
 function llmFooter(...parts: string[]): string {
@@ -309,15 +300,9 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   const client = sheetClient(env);
 
   const now = nowBA();
-  const today = todayISO();
-  const yesterday = prevISO(today);
-  const [hoyEntries, ayerEntries] = await Promise.all([readDay(client, today), readDay(client, yesterday)]);
-  const hint = comidaHint(hoyEntries, ayerEntries);
-  const recientes = formatRecientes([
-    { fecha: yesterday, entries: ayerEntries },
-    { fecha: today, entries: hoyEntries },
-  ]);
-  const ctx = ctxNote(hint.texto, recientes);
+  const dias = await readContext(client);
+  const recientes = formatRecientes(dias);
+  const ctx = escapeHtml(recientes);
 
   // Replying to a saved-meal message is just strong context now (not a forced edit): we hand
   // that record to the model, and it decides agregar vs editar like for any other message.
@@ -330,7 +315,6 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
     env.OPENAI_API_KEY,
     userText,
     now,
-    hint.texto,
     recientes,
     repliedEntry ? summary(repliedEntry) : "",
   );
@@ -348,6 +332,7 @@ async function handleMessage(env: Bindings, msg: TgMessage): Promise<void> {
   const byMatch = dayEntries.find((e) => e.comida === entry.comida);
   const byReply = repliedRow ? dayEntries.find((e) => e.row === repliedRow) : undefined;
   const target = entry.accion === "editar" ? (byReply ?? byMatch) : byMatch;
+  validateMealWrite(dias, entry, target?.row);
 
   // Edit, or a new meal that collides with an existing one → propose an overwrite to
   // accept/reject (never write silently). Both are "overwrite"; only clean appends auto-save.
@@ -405,7 +390,10 @@ async function handleCallback(env: Bindings, cq: TgCallback): Promise<void> {
       await reply(token, chatId, "❌ No pude leer la propuesta, reenviá la corrección.", { replyTo: messageId });
       return;
     }
-    await overwrite(sheetClient(env), row, prop);
+    const client = sheetClient(env);
+    const dias = await readContext(client);
+    validateMealWrite(dias, prop, row);
+    await overwrite(client, row, prop);
     await dropButtons(token, chatId, messageId);
     await reply(token, chatId, `✅ <b>Aplicado</b>\n${summary(prop)}${tech("overwrite", row)}`, { replyTo: messageId });
 

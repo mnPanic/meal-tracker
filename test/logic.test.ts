@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  comidaHintAt,
+  validateMealWrite,
   diff,
   formatRecientes,
   isSavedMeal,
@@ -40,54 +40,6 @@ describe("prevISO", () => {
   });
 });
 
-describe("comidaHintAt", () => {
-  const today = "2026-06-21";
-
-  it("madrugada → Cena del día anterior", () => {
-    const h = comidaHintAt([], [], 3, today);
-    expect(h).toMatchObject({ fecha: "2026-06-20", comida: "Cena" });
-    expect(h.texto).toContain('"hoy" y la ausencia de fecha significan 2026-06-20');
-    expect(h.texto).toContain("solo si el mensaje no nombra una");
-    expect(h.texto).toContain("Merienda es la única comida opcional");
-  });
-
-  it("explicit-meal bug case: yesterday's Cena missing shows up as pending", () => {
-    // 09:00, today empty, yesterday has everything but Cena.
-    const ayer = ["Desayuno", "Almuerzo", "Merienda"].map((c) => sheet(c));
-    const h = comidaHintAt([], ayer, 9, today);
-    // Most probable is the oldest pending: yesterday's Cena.
-    expect(h).toMatchObject({ fecha: "2026-06-20", comida: "Cena" });
-    expect(h.texto).toContain("Cena del 2026-06-20");
-    expect(h.texto).toContain("Desayuno del 2026-06-21");
-  });
-
-  it("lists pending mandatory meals up to the time ceiling, skipping optional Merienda", () => {
-    // 18:00 (ceiling = Merienda), only Desayuno logged today, yesterday complete.
-    const ayer = ORDEN_FULL.map((c) => sheet(c));
-    const h = comidaHintAt([sheet("Desayuno")], ayer, 18, today);
-    expect(h).toMatchObject({ comida: "Almuerzo", fecha: today });
-    expect(h.texto).toContain("Almuerzo del 2026-06-21");
-    expect(h.texto).not.toContain("Merienda del"); // optional, not listed as pending
-    expect(h.texto).toContain("La Merienda es la única comida opcional");
-  });
-
-  it("at dinner time still points to the oldest pending meal", () => {
-    const ayer = ORDEN_FULL.map((c) => sheet(c));
-    const h = comidaHintAt([sheet("Desayuno")], ayer, 21, today);
-    expect(h).toMatchObject({ comida: "Almuerzo", fecha: today });
-    expect(h.texto).toContain(`Almuerzo del ${today}, Cena del ${today}`);
-  });
-
-  it("nothing pending → points at the ceiling meal", () => {
-    const ayer = ORDEN_FULL.map((c) => sheet(c));
-    const hoy = [sheet("Desayuno"), sheet("Almuerzo")];
-    const h = comidaHintAt(hoy, ayer, 13, today); // ceiling = Almuerzo, both logged
-    expect(h.comida).toBe("Almuerzo");
-    expect(h.texto).toContain("ninguna");
-  });
-});
-
-const ORDEN_FULL = ["Desayuno", "Almuerzo", "Merienda", "Cena"];
 
 describe("summary ⇄ parseSummary round-trip", () => {
   it("recovers the entry from its own summary", () => {
@@ -150,7 +102,73 @@ describe("formatRecientes", () => {
       { fecha: "2026-06-20", entries: [sheet("Desayuno", { notas: "yoghurt", calificacion: "OK" })] },
       { fecha: "2026-06-21", entries: [] },
     ]);
-    expect(out).toContain("Desayuno [Casa, OK]: yoghurt");
-    expect(out).toContain("2026-06-21: (sin registros)");
+    expect(out).toContain("Cargada [Casa, OK]: yoghurt");
+    expect(out).toContain("| 2026-06-21 | Pendiente | Pendiente | Pendiente (opcional) | Pendiente |");
+  });
+
+  it("keeps Merienda pending until a later meal is recorded", () => {
+    const entries = [sheet("Desayuno"), sheet("Almuerzo")];
+    expect(formatRecientes([{ fecha: "2026-06-21", entries }])).toContain("Pendiente (opcional)");
+    expect(formatRecientes([{ fecha: "2026-06-21", entries: [...entries, sheet("Cena")] }])).toContain("Omitida");
+  });
+
+  it("reports mandatory holes within a day", () => {
+    expect(() => formatRecientes([{ fecha: "2026-06-21", entries: [sheet("Desayuno"), sheet("Cena")] }]))
+      .toThrow("Almuerzo del 2026-06-21");
+  });
+
+  it("reports a missing dinner and an entirely empty intermediate day", () => {
+    expect(() => formatRecientes([
+      { fecha: "2026-06-20", entries: [sheet("Desayuno"), sheet("Almuerzo")] },
+      { fecha: "2026-06-21", entries: [] },
+      { fecha: "2026-06-22", entries: [sheet("Desayuno")] },
+    ])).toThrow(/Cena del 2026-06-20.*Desayuno del 2026-06-21.*Almuerzo del 2026-06-21.*Cena del 2026-06-21/);
+  });
+
+  it("does not infer holes before the first recorded day or in an empty window", () => {
+    const days = [{ fecha: "2026-06-20", entries: [] }];
+    expect(formatRecientes(days)).toContain("Sin registros previos");
+    expect(formatRecientes([...days, { fecha: "2026-06-21", entries: [sheet("Desayuno")] }]))
+      .toContain("Sin registros previos");
+  });
+
+  it("detects a missing breakfast on the first recorded day", () => {
+    expect(() => formatRecientes([{ fecha: "2026-06-21", entries: [sheet("Almuerzo")] }]))
+      .toThrow("Desayuno del 2026-06-21");
+  });
+
+  it("sorts dates and escapes table separators and newlines in notes", () => {
+    const out = formatRecientes([
+      { fecha: "2026-06-21", entries: [] },
+      { fecha: "2026-06-20", entries: [sheet("Desayuno", { notas: "a|b\nc" })] },
+    ]);
+    expect(out.indexOf("2026-06-20")).toBeLessThan(out.indexOf("2026-06-21"));
+    expect(out).toContain("a\\|b c");
+  });
+});
+
+describe("validateMealWrite", () => {
+  const days = [{ fecha: "2026-06-21", entries: [sheet("Desayuno", { row: 1 }), sheet("Almuerzo", { row: 2 })] }];
+
+  it("allows skipping Merienda for an explicit Cena", () => {
+    expect(() => validateMealWrite(days, meal({ comida: "Cena" }))).not.toThrow();
+  });
+
+  it("rejects a new meal that skips a mandatory one", () => {
+    expect(() => validateMealWrite([{ ...days[0], entries: [days[0].entries[0]] }], meal({ comida: "Cena" })))
+      .toThrow("Almuerzo del 2026-06-21");
+  });
+
+  it("rejects renaming Almuerzo to Cena, leaving a hole", () => {
+    expect(() => validateMealWrite(days, meal({ comida: "Cena" }), 2)).toThrow("Almuerzo del 2026-06-21");
+    expect(days[0].entries[1].comida).toBe("Almuerzo");
+  });
+
+  it("allows a correction that keeps the sequence intact", () => {
+    expect(() => validateMealWrite(days, meal({ notas: "corregida" }), 2)).not.toThrow();
+  });
+
+  it("rejects dates outside the validated window", () => {
+    expect(() => validateMealWrite(days, meal({ fecha: "2026-06-22" }))).toThrow("fuera del contexto");
   });
 });

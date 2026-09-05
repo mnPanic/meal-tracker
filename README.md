@@ -29,9 +29,9 @@ graph LR
 | Pieza | Archivo | Rol |
 |---|---|---|
 | Worker / webhook | `src/index.ts` | Recibe updates de Telegram, orquesta el flujo, responde. |
-| Lógica pura | `src/logic.ts` | Helpers sin side-effects (hint de comida, parse/format de mensajes, diff/summary), testeados en `test/logic.test.ts`. |
+| Lógica pura | `src/logic.ts` | Tabla de contexto, validación de huecos, parse/format de mensajes y diff/summary, testeados en `test/logic.test.ts`. |
 | Telegram | `src/telegram.ts` | Helpers de la Bot API (descarga de archivos para notas de voz). |
-| Transcripción + extracción | `src/openai.ts` | `gpt-4o-mini-transcribe` (voz→texto) + `gpt-4o-mini` structured outputs → `MealEntry`. |
+| Transcripción + extracción | `src/openai.ts` | `gpt-4o-mini-transcribe` (voz→texto) + `gpt-5.6-luna` structured outputs → `MealEntry`. |
 | Cliente del sheet | `src/sheets.ts` | Llama al Apps Script (read/append/overwrite + views), con token. |
 | Backend del sheet | `apps-script/Code.gs` | Web app que lee/escribe la planilla. Contrato en `apps-script/README.md`. |
 
@@ -55,7 +55,14 @@ graph LR
    Event-driven, sin cron.
 
 Cada respuesta incluye, en un bloque colapsable **🧩 Contexto del LLM**, el mensaje/transcript
-original (`💬`/`🎤`) más el hint y las comidas recientes que se le pasaron al modelo, para debugging.
+original (`💬`/`🎤`) más una tabla de comidas cargadas, pendientes y meriendas omitidas, para debugging.
+El lookback del contexto es de **7 días**: hoy y los seis días anteriores, según la fecha de
+Buenos Aires, ordenados del más antiguo al más reciente.
+No hay un hint separado. Merienda queda pendiente mientras no haya ningún registro posterior;
+si lo hay, se considera omitida. Un hueco obligatorio desde el primer día con registros hasta
+la última comida cargada produce un error. Se valida también la secuencia resultante antes de
+agregar o proponer una edición, y nuevamente al aceptarla. Los días vacíos anteriores al primer
+día con registros quedan fuera de la secuencia conocida.
 
 ### Reglas de dominio
 
@@ -63,15 +70,17 @@ original (`💬`/`🎤`) más el hint y las comidas recientes que se le pasaron 
 - **`Score`** (columna E) es **fórmula del sheet**: `SWITCH(Modo) + SWITCH(Calificacion)`, rango 0–5.
   El bot nunca lo setea; el Apps Script reescribe la fórmula por fila (con `;`, locale español).
 - **`Notas`**: formato `{lugar|evento} - plato`. Casa = solo el plato; Delivery/Afuera = lugar + plato.
-- **`Fecha`**: usa el día conversacional del usuario. Entre 00:00 y 05:59, `"hoy"` y la ausencia
-  de fecha todavía significan el día calendario anterior (hasta dormir), salvo que el mensaje
-  indique explícitamente que ya empezó el nuevo día. El usuario carga las comidas en orden
+- **`Fecha`**: entre 00:00 y 05:59, `"hoy"` significa el día calendario anterior (hasta dormir),
+  salvo que el mensaje indique explícitamente que ya empezó el nuevo día. Sin fecha explícita,
+  se sigue la secuencia del contexto. El usuario carga las comidas en orden
   `Desayuno → Almuerzo → Merienda → Cena`; el contexto reciente ayuda a conservar esa secuencia.
   **Merienda es la única comida opcional**; Desayuno, Almuerzo y Cena son obligatorias. Fechas
   explícitas como `"ayer"`, `"el lunes"` o `"12/06"` se resuelven aparte.
 - **Carga atrasada**: el usuario puede ponerse al día cargando varias comidas juntas y en secuencia.
   La comida nombrada en el mensaje siempre gana sobre la hora. Si no nombra ninguna, se elige la
-  pendiente obligatoria más antigua, aunque el horario actual corresponda a una comida posterior.
+  pendiente más antigua (incluida Merienda mientras no haya una carga posterior), aunque el
+  horario actual corresponda a una comida posterior. Una comida explícita siempre prevalece;
+  si dejaría un hueco obligatorio, se informa el error en vez de reasignarla.
 
 ### Garantías del backend (Apps Script)
 

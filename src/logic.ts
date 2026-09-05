@@ -1,4 +1,4 @@
-// Pure, side-effect-free helpers (no network, no `new Date()`): the meal hint, the
+// Pure, side-effect-free helpers (no network): the meal table and sequence validation, the
 // message (re)parsing and the diff/summary formatting. Kept apart from index.ts so they
 // can be unit-tested deterministically (see test/logic.test.ts).
 
@@ -15,69 +15,49 @@ export function prevISO(fecha: string): string {
   return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
 }
 
-export interface Hint {
-  fecha: string; // fecha de la comida más probable
-  comida: string; // comida más probable
-  texto: string; // texto para el prompt y el bloque de contexto
+export interface MealDay {
+  fecha: string;
+  entries: SheetEntry[];
 }
 
-// Deterministic hint from the BA hour and what's already logged. As meals are logged in
-// order, this lists the PENDING mandatory meals (yesterday's Cena if missing, then today's
-// up to the time ceiling), marks Merienda as optional, and points at the most probable one
-// (the first pending). `hora` is the BA hour (0-23); `today` is YYYY-MM-DD in BA.
-export function comidaHintAt(hoy: SheetEntry[], ayer: SheetEntry[], hora: number, today: string): Hint {
-  const yest = prevISO(today);
-
-  // Madrugada (antes de las 6): el usuario todavía considera que está en el día anterior
-  // hasta que se va a dormir. Esto afecta tanto la fecha por defecto como la palabra "hoy";
-  // Cena sigue siendo solo la comida más probable cuando el mensaje no nombra una.
-  if (hora < 6) {
-    return {
-      fecha: yest,
-      comida: "Cena",
-      texto:
-        `Es de madrugada y el día conversacional sigue siendo ${yest} hasta que el usuario se vaya a dormir: ` +
-        `"hoy" y la ausencia de fecha significan ${yest}. La comida más probable, solo si el mensaje no nombra una, ` +
-        `es la Cena del ${yest}. La Merienda es la única comida opcional; Desayuno, Almuerzo y Cena son obligatorias.`,
-    };
-  }
-
-  // Techo: la comida más tardía plausible según la hora.
-  let techo = 0; // Desayuno
-  if (hora >= 19) techo = 3;
-  else if (hora >= 16) techo = 2;
-  else if (hora >= 12) techo = 1;
-
-  const pendientes: { fecha: string; comida: string }[] = [];
-  // Cena de ayer sin cargar => sigue pendiente (carga tardía a la madrugada/mañana siguiente).
-  if (!ayer.some((e) => e.comida === "Cena")) pendientes.push({ fecha: yest, comida: "Cena" });
-  // Comidas obligatorias de hoy faltantes hasta el techo.
-  const cargadasHoy = new Set(hoy.map((e) => e.comida));
-  ORDEN.slice(0, techo + 1).forEach((c, i) => {
-    if (i !== OPCIONAL && !cargadasHoy.has(c)) pendientes.push({ fecha: today, comida: c });
+// Callers supply consecutive calendar days. Leading empty days are outside the known sequence.
+export function formatRecientes(days: MealDay[]): string {
+  const ordered = days.toSorted((a, b) => a.fecha.localeCompare(b.fecha));
+  const firstDay = ordered.findIndex((day) => day.entries.length > 0);
+  const slots = ordered.flatMap((day) => ORDEN.map((comida) =>
+    day.entries.find((entry) => entry.comida === comida)));
+  const last = slots.findLastIndex((entry) => entry !== undefined);
+  const holes: string[] = [];
+  const cell = (value: string) => value.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+  const rows = ordered.map((day, dayIndex) => {
+    const values = ORDEN.map((comida, mealIndex) => {
+      const index = dayIndex * ORDEN.length + mealIndex;
+      const entry = slots[index];
+      if (entry) return cell(`Cargada [${entry.modo}, ${entry.calificacion}]: ${entry.notas}`);
+      if (firstDay < 0 || dayIndex < firstDay) return "Sin registros previos";
+      if (index < last) {
+        if (mealIndex === OPCIONAL) return "Omitida";
+        holes.push(`${comida} del ${day.fecha}`);
+        return "ERROR: hueco";
+      }
+      return mealIndex === OPCIONAL ? "Pendiente (opcional)" : "Pendiente";
+    });
+    return `| ${day.fecha} | ${values.join(" | ")} |`;
   });
-
-  const probable = pendientes[0] ?? { fecha: today, comida: ORDEN[techo] };
-  const lista = pendientes.length
-    ? pendientes.map((p) => `${p.comida} del ${p.fecha}`).join(", ")
-    : "ninguna (todas las obligatorias ya están cargadas)";
-  const texto =
-    `Pendientes en orden: ${lista}. La Merienda es la única comida opcional; Desayuno, Almuerzo y Cena son obligatorias. ` +
-    `Lo más probable, salvo que el mensaje diga otra cosa, es la ${probable.comida} del ${probable.fecha}.`;
-  return { fecha: probable.fecha, comida: probable.comida, texto };
+  if (holes.length) throw new Error(`Hay huecos en la carga: ${holes.join(", ")}. Hay comidas posteriores registradas; corregí la planilla antes de continuar.`);
+  return ["| Fecha | Desayuno | Almuerzo | Merienda | Cena |", "| --- | --- | --- | --- | --- |", ...rows].join("\n");
 }
 
-// Compact block of recent meals (one line per day) with their modo/calificación/notas, so
-// the model can edit a meal preserving the fields the message doesn't mention.
-export function formatRecientes(days: { fecha: string; entries: SheetEntry[] }[]): string {
-  return days
-    .map(({ fecha, entries }) => {
-      const items = entries.length
-        ? entries.map((e) => `${e.comida} [${e.modo}, ${e.calificacion}]: ${e.notas}`).join("; ")
-        : "(sin registros)";
-      return `${fecha}: ${items}`;
-    })
-    .join("\n");
+// Validate the resulting sequence, including edits that rename an existing meal.
+export function validateMealWrite(days: MealDay[], entry: MealEntry, row?: number): void {
+  if (!ORDEN.includes(entry.comida)) throw new Error(`Comida inválida: ${entry.comida}`);
+  if (!days.some((day) => day.fecha === entry.fecha)) throw new Error("La fecha está fuera del contexto de 7 días.");
+  const proposed = days.map((day) => ({
+    ...day,
+    entries: day.entries.filter((saved) => row === undefined || saved.row !== row),
+  }));
+  proposed.find((day) => day.fecha === entry.fecha)!.entries.push({ ...entry, row: row ?? -1, score: 0 });
+  formatRecientes(proposed);
 }
 
 export function escapeHtml(s: string): string {
