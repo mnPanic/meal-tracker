@@ -33,6 +33,44 @@ async function failure(promise: Promise<unknown>) {
 }
 
 describe("Apps Script reads", () => {
+  function useAbortableFetch(responseDelayMs: number) {
+    // Node's native AbortSignal.timeout does not use Vitest's fake clock.
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("expired", "TimeoutError")), ms);
+      return controller.signal;
+    });
+    fetchMock.mockImplementation((_url, { signal }: { signal: AbortSignal }) => new Promise((resolve, reject) => {
+      const aborted = () => { clearTimeout(timer); reject(signal.reason); };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", aborted);
+        resolve(ok());
+      }, responseDelayMs);
+      signal.addEventListener("abort", aborted, { once: true });
+    }));
+  }
+
+  it("allows a valid response slower than 10 seconds without retrying", async () => {
+    useAbortableFetch(12_000);
+    const pending = readDay(client);
+    await vi.advanceTimersByTimeAsync(12_000);
+    await expect(pending).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(console.info).toHaveBeenCalledWith(expect.objectContaining({
+      event: "sheets_slow_response", durationMs: 12_000, status: 200,
+    }));
+  });
+
+  it("still aborts hung reads, retries within bounds, and reports the timeout phase", async () => {
+    useAbortableFetch(60_000);
+    const error = await failure(readDay(client));
+    expect(error).toMatchObject({ message: expect.stringContaining("after 3 attempt(s): request timed out after 30000 ms (waiting for headers)") });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(console.error).toHaveBeenCalledWith(expect.objectContaining({
+      timeoutMs: 30_000, durationMs: 30_000, retry: false,
+    }));
+  });
+
   it("recovers from HTML 500 with a diagnostic and backoff", async () => {
     fetchMock.mockResolvedValueOnce(html()).mockResolvedValueOnce(ok());
     const pending = readDay(client, meal.fecha);
@@ -81,7 +119,7 @@ describe("Apps Script reads", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it.each([new TypeError("fetch failed with a secret URL"), new DOMException("timeout", "TimeoutError")])(
+  it.each([new TypeError("fetch failed with a secret URL"), new DOMException("timeout with a secret URL", "TimeoutError")])(
     "retries transport errors with a timeout signal", async (error) => {
       fetchMock.mockRejectedValueOnce(error).mockResolvedValueOnce(ok());
       const pending = readDay(client);

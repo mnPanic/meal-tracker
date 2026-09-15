@@ -65,13 +65,15 @@ npx wrangler tail --format json --search sheets_request_failed
 ```
 
 Cada fallo registra `operation`, `fecha`/`view`/`row` cuando corresponda, `attempt`, `status`,
-`contentType`, `finalHost`, `redirected`, `durationMs`, `retry` y `delayMs`.
+`contentType`, `finalHost`, `redirected`, `durationMs`, `timeoutMs`, `retry` y `delayMs`.
 Si la respuesta no es JSON, `preview` contiene hasta 600 caracteres de texto legible: elimina
 etiquetas, scripts y estilos, decodifica entidades comunes y oculta tokens y URLs. No se registra
 el cuerpo de la petición ni el contenido JSON de comidas. Si no hubo respuesta HTTP, `status`
-queda ausente y `error` indica timeout o fallo de red/lectura del stream.
+queda ausente y `error` indica timeout o fallo de red/lectura del stream. Los timeouts distinguen
+si se estaba esperando la respuesta HTTP o leyendo su cuerpo. `sheets_slow_response` registra
+lecturas/escrituras exitosas de 10 s o más; incluye duración y estado, sin contenido de comidas.
 
-Las lecturas GET hacen hasta **3 intentos**, con timeout de **10 segundos por intento**, pausas de
+Las lecturas GET hacen hasta **3 intentos**, con timeout de **30 segundos por intento**, pausas de
 500 ms y 1 s más hasta 249 ms aleatorios. Reintentan HTTP 408/429/5xx, fallos de transporte y
 respuestas 2xx que no cumplen el contrato JSON. Respetan `Retry-After`; si pide más de 10 s de
 espera, terminan con error en lugar de reintentar antes de tiempo. HTTP 401/403/404 y errores de

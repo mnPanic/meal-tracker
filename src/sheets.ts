@@ -75,6 +75,9 @@ async function responseText(r: Response): Promise<string> {
 
 type WriteBody = { action: string; row?: number } & Record<string, unknown>;
 
+// Valid Apps Script reads have been observed taking over 10 seconds.
+const REQUEST_TIMEOUT_MS = 30_000;
+
 async function request<T>(c: SheetClient, params: Record<string, string>, body?: WriteBody): Promise<T> {
   const method = body ? "POST" : "GET";
   const url = new URL(c.url);
@@ -90,7 +93,7 @@ async function request<T>(c: SheetClient, params: Record<string, string>, body?:
     let preview: string | undefined;
     try {
       r = await fetch(url.toString(), {
-        method, redirect: "follow", signal: AbortSignal.timeout(10_000),
+        method, redirect: "follow", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         headers: body ? { "content-type": "application/json" } : undefined,
         body: body ? JSON.stringify({ token: c.secret, ...body }) : undefined,
       });
@@ -102,13 +105,19 @@ async function request<T>(c: SheetClient, params: Record<string, string>, body?:
         const transient = r.status === 408 || r.status === 429 || r.status >= 500 || (r.ok && !valid);
         throw new SheetsResponseError(`HTTP ${r.status}; ${valid ? "upstream error" : "expected JSON with ok:boolean"}`, transient);
       }
-      if (attempt > 1) console.info({ event: "sheets_recovered", operation, ...params, attempt, status: r.status });
+      // Log slow successes too, so latency is visible even when no retry is needed.
+      const durationMs = Date.now() - started;
+      if (attempt > 1 || durationMs >= 10_000) console.info({
+        event: attempt > 1 ? "sheets_recovered" : "sheets_slow_response",
+        operation, ...params, attempt, status: r.status, durationMs,
+      });
       return json as T;
     } catch (cause) {
       // Fetch errors can contain the request URL (including the token). Never log them raw.
       const error = cause instanceof SheetsResponseError ? cause : new SheetsResponseError(
         cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError")
-          ? "request timed out" : "network or response stream error", true,
+          ? `request timed out after ${REQUEST_TIMEOUT_MS} ms (${r ? "reading body" : "waiting for headers"})`
+          : "network or response stream error", true,
       );
       const retryAfter = r?.headers.get("retry-after");
       const retryAfterMs = retryAfter ? (/^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now()) : 0;
@@ -118,7 +127,8 @@ async function request<T>(c: SheetClient, params: Record<string, string>, body?:
         event: "sheets_request_failed", method, operation, ...params, row: body?.row, attempt,
         status: r?.status, contentType: r?.headers.get("content-type"),
         finalHost: r?.url ? new URL(r.url).hostname : undefined, redirected: r?.redirected,
-        durationMs: Date.now() - started, error: error.message, preview, retry, delayMs: retry ? delayMs : undefined,
+        durationMs: Date.now() - started, timeoutMs: REQUEST_TIMEOUT_MS,
+        error: error.message, preview, retry, delayMs: retry ? delayMs : undefined,
       };
       if (retry) console.warn(detail); else console.error(detail);
       if (!retry) throw new SheetsResponseError(
