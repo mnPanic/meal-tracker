@@ -49,10 +49,42 @@ npx wrangler tail --status error           # solo requests con error
 npx wrangler tail --search "append"        # filtrar por texto
 ```
 
-Los logs salen en vivo mientras el comando corre; no hay retención larga en el plan free. Para
-historial usar el dashboard de Cloudflare (Workers & Pages → meal-tracker → Logs / Observability).
+`wrangler tail` muestra solo eventos nuevos mientras el comando corre. `wrangler.toml` habilita
+Workers Logs persistentes con muestreo al 100%; se activa al deployar el Worker. Para historial,
+usar el dashboard de Cloudflare (Workers & Pages → meal-tracker → Logs / Observability).
+La retención y los límites dependen del plan; habilitar logs no recupera eventos anteriores.
 Además, **los propios mensajes del bot en Telegram traen detalle técnico** (operación + fila, p.ej.
 `append · fila 413`, y el stack crudo ante un error) — suele ser el primer lugar para mirar.
+
+### Diagnosticar respuestas de Apps Script
+
+Buscar `sheets_request_failed` en Workers Logs o ver los eventos en vivo:
+
+```bash
+npx wrangler tail --format json --search sheets_request_failed
+```
+
+Cada fallo registra `operation`, `fecha`/`view`/`row` cuando corresponda, `attempt`, `status`,
+`contentType`, `finalHost`, `redirected`, `durationMs`, `retry` y `delayMs`.
+Si la respuesta no es JSON, `preview` contiene hasta 600 caracteres de texto legible: elimina
+etiquetas, scripts y estilos, decodifica entidades comunes y oculta tokens y URLs. No se registra
+el cuerpo de la petición ni el contenido JSON de comidas. Si no hubo respuesta HTTP, `status`
+queda ausente y `error` indica timeout o fallo de red/lectura del stream.
+
+Las lecturas GET hacen hasta **3 intentos**, con timeout de **10 segundos por intento**, pausas de
+500 ms y 1 s más hasta 249 ms aleatorios. Reintentan HTTP 408/429/5xx, fallos de transporte y
+respuestas 2xx que no cumplen el contrato JSON. Respetan `Retry-After`; si pide más de 10 s de
+espera, terminan con error en lugar de reintentar antes de tiempo. HTTP 401/403/404 y errores de
+aplicación `{ok:false}` no se reintentan. `sheets_recovered` confirma una lectura recuperada.
+
+POST (`append`/`overwrite`) usa el mismo diagnóstico, pero **nunca se reintenta automáticamente**:
+la escritura puede haberse completado aunque falle la respuesta. Antes de repetirla, verificar
+la planilla. El cuerpo de una respuesta tiene un límite de 1 MiB.
+
+No filtrar solo por `--status error`: el webhook captura las excepciones y responde HTTP 200,
+por lo que un fallo de Apps Script puede aparecer dentro de una invocación exitosa.
+Un HTML/500 que luego desaparece no demuestra un cold start. Correlacionar hora y mensaje con
+**Executions** del Apps Script para distinguir errores del script, cuotas y fallos de Google.
 
 ### Secrets (Worker)
 

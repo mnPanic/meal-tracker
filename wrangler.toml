@@ -3,6 +3,12 @@ main = "src/index.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
 # Secrets (set with `wrangler secret put <NAME>`), do NOT commit:
 #   TELEGRAM_BOT_TOKEN     - from @BotFather
 #   TELEGRAM_WEBHOOK_SECRET - random string; validated on every webhook call
