@@ -32,9 +32,11 @@ graph LR
 
 | Pieza | Archivo | Rol |
 |---|---|---|
-| Worker / webhook + Workflow | `src/index.ts` | Acepta updates por ID; procesa y responde desde un trabajo persistente. |
+| Worker / webhook + Workflow | `src/index.ts` | Acepta updates por ID; conecta las implementaciones reales y corre el bot en un trabajo persistente. |
+| Bot | `src/bot.ts` | Flujo completo de un update (mensaje o botón) → escrituras y respuestas, vía las interfaces de `src/ports.ts`. |
+| Interfaces | `src/ports.ts` | `Llm`, `MealStore`, `Chat`, `Clock`: lo que el bot necesita del mundo. |
 | Lógica pura | `src/logic.ts` | Tabla de contexto, validación de huecos, parse/format de mensajes y diff/summary, testeados en `test/logic.test.ts`. |
-| Telegram | `src/telegram.ts` | Helpers de la Bot API (descarga de archivos para notas de voz). |
+| Telegram | `src/telegram.ts` | `Chat` sobre la Bot API (mensajes, botones, descarga de notas de voz). |
 | Transcripción + extracción | `src/openai.ts` | `gpt-transcribe` con keywords (voz→texto) + `gpt-6-luna` structured outputs → `MealEntry`. |
 | Cliente del sheet | `src/sheets.ts` | Llama al Apps Script (read/append/overwrite + views), con token. |
 | Backend del sheet | `apps-script/Code.gs` | Web app que lee/escribe la planilla. Contrato en `apps-script/README.md`. |
@@ -152,10 +154,30 @@ código requiere **New version** sobre el mismo deployment para que tome.
 ## Desarrollo
 
 ```bash
+npm test             # vitest
 npx tsc --noEmit     # typecheck
 npx wrangler dev     # local (usa .dev.vars)
 npx wrangler tail    # logs en vivo
 ```
+
+### Tests
+
+- `test/bot.test.ts`: **integración**. Parten de un mensaje (o un tap en un botón), fijan la
+  interpretación del LLM y verifican qué se escribe en la planilla y qué responde el bot.
+  El bot es el real; el resto va detrás de las interfaces de `src/ports.ts`
+  (fakes en `test/support/fakes.ts`):
+  - `ScriptedLlm`: respuestas precargadas; guarda cada input para verificar el contexto enviado.
+  - `FakeStore`: planilla en memoria con la semántica del Apps Script (filas desde la 2, ventana
+    de 7 días, `overwrite` conserva la fecha, score por fórmula). Las vistas semanal/mensual se cargan
+    a mano.
+  - `FakeChat`: registra lo enviado y aplica las reglas de Telegram (HTML inválido o más de 4096
+    caracteres rompen). Los replies y botones del harness usan el **texto plano** que devolvería
+    Telegram, así se prueba el re-parseo sin estado.
+- `test/logic.test.ts`: combinatoria de secuencia/huecos y formatos.
+- `test/sheets.test.ts`: contrato HTTP del cliente de Apps Script (reintentos, timeouts, logs).
+- `test/webhook.test.ts`: aceptación del webhook y wiring del Workflow.
+
+La interpretación real del LLM no se testea (no hay evals).
 
 Los mensajes del bot incluyen detalle técnico (modo dev): operación + fila ejecutada
 (`append · fila 413`) y, ante un error, el stack crudo formateado.

@@ -1,5 +1,7 @@
 // OpenAI transcription + structured extraction.
 
+import type { ExtractInput, Llm } from "./ports";
+
 export interface MealEntry {
   fecha: string; // YYYY-MM-DD (resuelta: hoy por defecto, o la fecha relativa/explícita mencionada)
   comida: string; // Desayuno|Almuerzo|Merienda|Cena, o "" si no está claro
@@ -154,16 +156,14 @@ const SCHEMA = {
   required: ["fecha", "comida", "modo", "calificacion", "notas", "accion", "aclaraciones"],
 } as const;
 
-// `now` is a human-readable BA datetime with weekday, e.g. "2026-06-15 14:30 (domingo)".
-// `recientes` is the meal table, including pending and skipped slots.
-// `replied` is the full text of the message the user is replying to.
-export async function extract(
-  apiKey: string,
-  transcript: string,
-  now: string,
-  recientes = "",
-  replied = "",
-): Promise<MealEntry> {
+export function openAiLlm(apiKey: string): Llm {
+  return {
+    transcribe: (audio) => transcribe(apiKey, audio),
+    extract: (input) => extract(apiKey, input),
+  };
+}
+
+export async function extract(apiKey: string, { text, now, recientes, replied }: ExtractInput): Promise<MealEntry> {
   const contexto = recientes
     ? `\nComidas recientes (contexto, con modo/calificación/notas):\n${recientes}`
     : "";
@@ -171,7 +171,7 @@ export async function extract(
     ? `\nMensaje completo al que el usuario está RESPONDIENDO (contexto previo, puede ser una aclaración o un registro guardado; no implica que ya esté guardado). Conservá los datos ya entendidos salvo que el mensaje actual los corrija. La tabla actual prevalece sobre cualquier tabla histórica incluida en este mensaje:\n${replied}\nFin del mensaje respondido.\n`
     : "";
   const system = SYSTEM_PROMPT;
-  const userContent = `Ahora es ${now} (Argentina).${contexto}${replyCtx}\nMensaje: ${transcript}`;
+  const userContent = `Ahora es ${now} (Argentina).${contexto}${replyCtx}\nMensaje: ${text}`;
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },

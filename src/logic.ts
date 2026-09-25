@@ -67,8 +67,10 @@ export function escapeHtml(s: string): string {
 // LOAD-BEARING FORMAT: parseSummary re-parses this exact layout from proposal messages to
 // recover the entry on accept (stateless). Keep fecha/comida/modo/calificacion on line 1 and
 // notas on its own line; don't reorder without updating parseSummary.
+// Returns HTML (escaped); parseSummary reads it back from Telegram's plain text.
 export function summary(entry: MealEntry): string {
-  return `📅 ${entry.fecha} · 🍽️ ${entry.comida} · 📍 ${entry.modo} · ⭐ ${entry.calificacion}\n📝 ${entry.notas}`;
+  const e = (s: string) => escapeHtml(s);
+  return `📅 ${e(entry.fecha)} · 🍽️ ${e(entry.comida)} · 📍 ${e(entry.modo)} · ⭐ ${e(entry.calificacion)}\n📝 ${e(entry.notas)}`;
 }
 
 // Recover the entry from a message built with summary(). Returns null if it doesn't match.
@@ -102,6 +104,6 @@ export function diff(base: MealEntry, prop: MealEntry): string {
   ];
   const changed = rows
     .filter(([, a, b]) => a !== b)
-    .map(([e, a, b]) => `${e} ${a || "—"} → <b>${b || "—"}</b>`);
+    .map(([e, a, b]) => `${e} ${escapeHtml(a) || "—"} → <b>${escapeHtml(b) || "—"}</b>`);
   return changed.length ? changed.join("\n") : "(sin cambios)";
 }

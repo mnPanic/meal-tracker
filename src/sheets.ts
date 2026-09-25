@@ -4,6 +4,7 @@
 // Writes are sandboxed server-side to a recent window (last 7 days, no future).
 
 import type { MealEntry } from "./openai";
+import type { MealStore } from "./ports";
 
 export interface SheetClient {
   url: string;
@@ -227,4 +228,15 @@ export function readSemanal(c: SheetClient, last?: number): Promise<PeriodoRow[]
 // Monthly summary table from "View semanalmensual".
 export function readMensual(c: SheetClient, last?: number): Promise<PeriodoRow[]> {
   return getView<PeriodoRow>(c, "mensual", last);
+}
+
+export function appsScriptStore(c: SheetClient): MealStore {
+  return {
+    readDay: (fecha) => readDay(c, fecha),
+    append: (entry) => append(c, entry),
+    overwrite: (row, entry) => overwrite(c, row, entry),
+    readDiario: (last) => readDiario(c, last),
+    readSemanal: (last) => readSemanal(c, last),
+    readMensual: (last) => readMensual(c, last),
+  };
 }

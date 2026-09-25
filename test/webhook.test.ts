@@ -5,15 +5,11 @@ vi.mock("cloudflare:workers", () => ({
     constructor(_ctx: unknown, protected env: unknown) {}
   },
 }));
-vi.mock("../src/sheets", () => ({
-  readDay: vi.fn(), append: vi.fn(), overwrite: vi.fn(),
-  readDiario: vi.fn(), readSemanal: vi.fn(), readMensual: vi.fn(),
-}));
-vi.mock("../src/openai", () => ({ extract: vi.fn(), transcribe: vi.fn() }));
+// The bot itself is covered by bot.test.ts; here only the webhook and Workflow wiring.
+const handleUpdate = vi.fn();
+vi.mock("../src/bot", () => ({ createBot: () => ({ handleUpdate }) }));
 
-import app, { MealWorkflow } from "../src/index";
-import { append, readDay } from "../src/sheets";
-import { extract } from "../src/openai";
+import app, { MealWorkflow, sheetClient } from "../src/index";
 
 const update = { update_id: 123, message: { message_id: 9, chat: { id: 42 }, text: "merendé casa ok" } };
 const env = {
@@ -43,7 +39,7 @@ describe("durable webhook acceptance", () => {
     const r = await webhook();
     expect(r.status).toBe(200);
     expect(env.MEAL_WORKFLOW.createBatch).toHaveBeenCalledWith([{ id: "telegram-123", params: update }]);
-    expect(readDay).not.toHaveBeenCalled();
+    expect(handleUpdate).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -52,7 +48,7 @@ describe("durable webhook acceptance", () => {
     expect((await webhook()).status).toBe(200);
     expect((await webhook()).status).toBe(200);
     expect(env.MEAL_WORKFLOW.createBatch.mock.calls[0]).toEqual(env.MEAL_WORKFLOW.createBatch.mock.calls[1]);
-    expect(readDay).not.toHaveBeenCalled();
+    expect(handleUpdate).not.toHaveBeenCalled();
   });
 
   it("does not acknowledge before durable acceptance", async () => {
@@ -69,7 +65,7 @@ describe("durable webhook acceptance", () => {
   it("returns 503 if enqueue fails so Telegram can redeliver", async () => {
     env.MEAL_WORKFLOW.createBatch.mockRejectedValue(new Error("unavailable"));
     expect((await webhook()).status).toBe(503);
-    expect(readDay).not.toHaveBeenCalled();
+    expect(handleUpdate).not.toHaveBeenCalled();
   });
 
   it("rejects unauthorized traffic and malformed IDs before enqueue", async () => {
@@ -81,22 +77,18 @@ describe("durable webhook acceptance", () => {
 });
 
 describe("background processing", () => {
-  it("passes the five-minute read budget and never enables whole-handler retries", async () => {
-    vi.mocked(readDay).mockResolvedValue([]);
-    vi.mocked(extract).mockResolvedValue({
-      fecha: new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(new Date()), comida: "Desayuno", modo: "Casa", calificacion: "OK",
-      notas: "", accion: "agregar", aclaraciones: [],
-    });
-    vi.mocked(append).mockRejectedValue(new Error("write outcome unknown"));
+  it("runs the bot once, without whole-handler retries, and propagates its failure", async () => {
+    handleUpdate.mockRejectedValue(new Error("write outcome unknown"));
     const step = { do: vi.fn(async (_name, _config, callback) => callback()) };
-    // Runtime classes are mocked; exercise the real workflow callback and handler.
     const workflow = new MealWorkflow({} as never, env as never);
     await expect(workflow.run({ payload: update } as never, step as never)).rejects.toThrow("write outcome unknown");
     expect(step.do).toHaveBeenCalledWith("process telegram update", expect.objectContaining({
       retries: { limit: 0, delay: "1 second" },
     }), expect.any(Function));
-    expect(readDay).toHaveBeenCalledWith(expect.objectContaining({ readRetryBudgetMs: 300_000 }), expect.any(String));
-    expect(append).toHaveBeenCalledTimes(1);
-    expect(fetch).toHaveBeenCalledTimes(1); // Reports the error to Telegram.
+    expect(handleUpdate).toHaveBeenCalledExactlyOnceWith(update);
+  });
+
+  it("gives Sheets reads the configured five-minute budget", () => {
+    expect(sheetClient(env as never).readRetryBudgetMs).toBe(300_000);
   });
 });
