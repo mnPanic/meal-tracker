@@ -223,3 +223,193 @@ describe("failures", () => {
     expect(h.chat.last.text).toContain("write outcome unknown");
   });
 });
+
+describe("several meals in one message", () => {
+  const BATCH = "hoy desayuné casa ok yoghurt griego con granola\nhoy almorcé delivery ok sanguche de pollo\nhoy merendé casa ok yoghurt griego con granola";
+  const desayuno = meal({ comida: "Desayuno", notas: "Yoghurt griego con granola" });
+  const almuerzo = meal({ comida: "Almuerzo", modo: "Delivery", notas: "Sanguche de pollo" });
+  const merienda = meal({ comida: "Merienda", notas: "Yoghurt griego con granola" });
+
+  function afterFullDay() {
+    const h = harness(FRIDAY_NIGHT);
+    h.store.seed(...fullDay("2026-09-24"));
+    return h;
+  }
+
+  it("saves them in order from one LLM call, one reply per meal", async () => {
+    const h = afterFullDay();
+    h.llm.willExtract(desayuno, almuerzo, merienda);
+
+    const userMsg = await h.send(BATCH);
+
+    expect(h.llm.calls).toHaveLength(1);
+    expect(h.store.rows.slice(4).map((r) => [r.row, r.comida, r.modo])).toEqual([
+      [6, "Desayuno", "Casa"], [7, "Almuerzo", "Delivery"], [8, "Merienda", "Casa"],
+    ]);
+    const replies = h.chat.messages;
+    expect(replies.map((m) => m.text.split("\n")[0])).toEqual([
+      "✅ Guardado (1/3)", "✅ Guardado (2/3)", "✅ Guardado (3/3)",
+    ]);
+    expect(replies.every((m) => m.replyTo === userMsg)).toBe(true);
+    expect(replies[1].text).toContain("🍽️ Almuerzo · 📍 Delivery");
+    expect(replies[1].text).toContain("append · fila 7");
+  });
+
+  it("saves nothing if any meal needs clarification, and saves all after the reply", async () => {
+    const h = afterFullDay();
+    h.llm.willExtract(desayuno, { ...almuerzo, calificacion: "", aclaraciones: ["¿El almuerzo fue OK, Mid o Bad?"] }, merienda);
+
+    const userMsg = await h.send(BATCH);
+
+    expect(h.store.writes).toEqual([]);
+    expect(h.chat.messages).toHaveLength(1);
+    const ask = h.chat.last;
+    expect(ask.replyTo).toBe(userMsg);
+    expect(ask.text).toContain("1. ✅ 📅 2026-09-25 · 🍽️ Desayuno · 📍 Casa · ⭐ OK · 📝 Yoghurt griego con granola");
+    expect(ask.text).toContain("2. ❓ 📅 2026-09-25 · 🍽️ Almuerzo · 📍 Delivery · ⭐ ❓ · 📝 Sanguche de pollo");
+    expect(ask.text).toContain("• ¿El almuerzo fue OK, Mid o Bad?");
+
+    h.llm.willExtract(desayuno, { ...almuerzo, calificacion: "Mid" }, merienda);
+    await h.send("mid", { replyTo: ask });
+
+    expect(h.llm.calls[1].replied).toContain(`💬 mensaje: ${BATCH}`);
+    expect(h.store.rows.slice(4).map((r) => [r.comida, r.calificacion])).toEqual([
+      ["Desayuno", "OK"], ["Almuerzo", "Mid"], ["Merienda", "OK"],
+    ]);
+  });
+
+  it("carries the original message (not every answer) through repeated clarifications", async () => {
+    const h = afterFullDay();
+    const unsure = { ...almuerzo, calificacion: "", aclaraciones: ["¿El almuerzo fue OK, Mid o Bad?"] };
+    h.llm.willExtract(desayuno, unsure, merienda);
+    await h.send(BATCH);
+
+    h.llm.willExtract(desayuno, unsure, merienda);
+    await h.send("ni idea", { replyTo: h.chat.last });
+    const secondAsk = h.chat.last;
+    expect(secondAsk.text).toContain(`💬 mensaje: ${BATCH}\n↩️ respuesta: ni idea`);
+
+    h.llm.willExtract(desayuno, { ...almuerzo, calificacion: "Mid" }, merienda);
+    await h.send("mid", { replyTo: secondAsk });
+
+    expect(h.llm.calls[2].replied).toContain(`💬 mensaje: ${BATCH}`);
+    const thirdFooter = h.chat.last.text;
+    expect(thirdFooter).toContain(`💬 mensaje: ${BATCH}\n↩️ respuesta: mid`);
+    expect(thirdFooter).not.toContain("ni idea");
+    expect(h.store.rows).toHaveLength(7);
+  });
+
+  it("proposes the whole batch when one meal collides, and applies it all on accept", async () => {
+    const h = afterFullDay();
+    h.store.seed({ fecha: "2026-09-25", comida: "Desayuno", modo: "Casa", calificacion: "Mid", notas: "Medialunas" });
+    h.llm.willExtract(desayuno, almuerzo, merienda);
+
+    const userMsg = await h.send(BATCH);
+
+    expect(h.store.writes).toEqual([]);
+    const proposal = h.chat.last;
+    expect(proposal.replyTo).toBe(userMsg);
+    expect(proposal.text).toContain("1. ⚠️ Ya tenías Desayuno el 2026-09-25 (fila 6)");
+    expect(proposal.text).toContain("⭐ Mid → OK");
+    expect(proposal.text).toContain("2. ➕ Nueva");
+    expect(proposal.text).toContain("acciones: overwrite · fila 6");
+
+    const before = h.chat.messages.length;
+    await h.tap(proposal, "Aceptar");
+
+    expect(h.store.writes).toEqual([
+      { op: "overwrite", row: 6 }, { op: "append", row: 7 }, { op: "append", row: 8 },
+    ]);
+    expect(h.store.rows.find((r) => r.row === 6)).toMatchObject({ calificacion: "OK", notas: "Yoghurt griego con granola" });
+    const applied = h.sentSince(before);
+    expect(applied.map((m) => m.text.split("\n")[0])).toEqual([
+      "✅ Aplicado (1/3)", "✅ Aplicado (2/3)", "✅ Aplicado (3/3)",
+    ]);
+    expect(applied[0].text).toContain("overwrite · fila 6");
+    expect(applied[2].text).toContain("append · fila 8");
+    expect(h.chat.buttonsDropped).toEqual([proposal.id]);
+  });
+
+  it("revalidates on accept and writes nothing if the sheet changed meanwhile", async () => {
+    const h = afterFullDay();
+    h.store.seed({ fecha: "2026-09-25", comida: "Desayuno", modo: "Casa", calificacion: "Mid", notas: "Medialunas" });
+    h.llm.willExtract(desayuno, almuerzo);
+    await h.send(BATCH);
+    h.store.seed({ fecha: "2026-09-25", comida: "Almuerzo", modo: "Casa", calificacion: "OK", notas: "Fideos" });
+
+    await expect(h.tap(h.chat.last, "Aceptar")).rejects.toThrow("Ya hay Almuerzo del 2026-09-25");
+
+    expect(h.store.writes).toEqual([]);
+  });
+
+  it("rejects a batch that leaves a mandatory hole, writing nothing", async () => {
+    const h = afterFullDay();
+    h.llm.willExtract(desayuno, meal({ comida: "Cena" }));
+
+    await expect(h.send("desayuné casa ok y cené casa ok")).rejects.toThrow("Almuerzo del 2026-09-25");
+
+    expect(h.store.writes).toEqual([]);
+  });
+
+  it("rejects a batch with the same meal twice", async () => {
+    const h = afterFullDay();
+    h.llm.willExtract(desayuno, { ...desayuno, notas: "Café" });
+
+    await expect(h.send("desayuné yoghurt y desayuné café")).rejects.toThrow("Desayuno del 2026-09-25 aparece dos veces");
+
+    expect(h.store.writes).toEqual([]);
+  });
+
+  it("sends the recaps once, after the whole batch is saved", async () => {
+    const h = afterFullDay();
+    h.llm.willExtract(desayuno, almuerzo, meal({ comida: "Cena", notas: "Pizza" }));
+
+    await h.send("desayuné..., almorcé..., cené...");
+
+    expect(h.chat.messages.map((m) => m.text.split("\n")[0])).toEqual([
+      "✅ Guardado (1/3)", "✅ Guardado (2/3)", "✅ Guardado (3/3)", "🌙 Cierre del día 2026-09-25",
+    ]);
+  });
+
+  it("edits only the replied meal of a saved batch", async () => {
+    const h = afterFullDay();
+    h.llm.willExtract(desayuno, almuerzo, merienda);
+    await h.send(BATCH);
+    const savedAlmuerzo = h.chat.messages[1];
+
+    h.llm.willExtract({ ...almuerzo, calificacion: "Mid", accion: "editar" });
+    await h.send("fue mid", { replyTo: savedAlmuerzo });
+
+    expect(h.llm.calls[1].replied).toContain("🍽️ Almuerzo · 📍 Delivery");
+    const proposal = h.chat.last;
+    expect(proposal.text).toContain("Propuesta de edición (fila 7)");
+    await h.tap(proposal, "Aceptar");
+    expect(h.store.writes.at(-1)).toEqual({ op: "overwrite", row: 7 });
+    expect(h.store.rows.find((r) => r.row === 7)?.calificacion).toBe("Mid");
+  });
+
+  it("asks when the LLM finds no meal at all", async () => {
+    const h = afterFullDay();
+    h.llm.willExtract();
+
+    await h.send("hola");
+
+    expect(h.store.writes).toEqual([]);
+    expect(h.chat.last.text).toContain("No encontré ninguna comida");
+  });
+
+  it("still applies proposals sent before batches existed (single-row callback)", async () => {
+    const h = afterFullDay();
+    h.store.seed({ fecha: "2026-09-25", comida: "Desayuno", modo: "Casa", calificacion: "Mid", notas: "Medialunas" });
+    const legacy = {
+      id: 1, chatId: 42, html: "",
+      text: "✏️ Propuesta de edición (fila 6)\n⭐ Mid → OK\n\n📅 2026-09-25 · 🍽️ Desayuno · 📍 Casa · ⭐ OK\n📝 Medialunas\nacciones: overwrite · fila 6",
+      keyboard: { inline_keyboard: [[{ text: "✅ Aceptar", callback_data: "ok:overwrite:6" }]] },
+    };
+
+    await h.tap(legacy, "Aceptar");
+
+    expect(h.store.writes).toEqual([{ op: "overwrite", row: 6 }]);
+    expect(h.store.rows.find((r) => r.row === 6)?.calificacion).toBe("OK");
+  });
+});

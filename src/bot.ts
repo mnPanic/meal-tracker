@@ -5,15 +5,16 @@ import type { MealEntry } from "./openai";
 import type { Chat, Clock, InlineKeyboard, Llm, MealStore } from "./ports";
 import type { DiarioRow, PeriodoRow } from "./sheets";
 import {
-  validateMealWrite,
+  validateBatch,
   diff,
   escapeHtml,
   formatRecientes,
   isSavedMeal,
+  parseItems,
   parseRow,
-  parseSummary,
   prevISO,
   summary,
+  type BatchItem,
 } from "./logic";
 
 export interface BotDeps {
@@ -68,26 +69,31 @@ function nowBA(date: Date): string {
   return `${isoBA(date)} ${time} (${weekday})`;
 }
 
-// Lines shown when an entry is incomplete/ambiguous (asks the user to confirm).
-function askLines(entry: MealEntry): string[] {
-  const v = (x: string) => (x ? escapeHtml(x) : "❓ no está claro");
+const isComplete = (e: MealEntry) => e.aclaraciones.length === 0 && Boolean(e.comida && e.modo && e.calificacion);
+
+// Lines shown when any entry is incomplete/ambiguous: every meal understood, marked ✅/❓, and
+// the questions. Nothing is saved until all of them are clear (one line per meal on purpose:
+// parseItems must not mistake these for proposals).
+function askLines(entries: MealEntry[]): string[] {
+  const v = (x: string) => (x ? escapeHtml(x) : "❓");
   return [
-    "Esto entendí, pero falta confirmar algo:",
-    `📅 <b>Fecha:</b> ${entry.fecha}`,
-    `🍽️ <b>Comida:</b> ${v(entry.comida)}`,
-    `📍 <b>Modo:</b> ${v(entry.modo)}`,
-    `⭐ <b>Calificación:</b> ${v(entry.calificacion)}`,
-    `📝 <b>Notas:</b> ${v(entry.notas)}`,
+    "Esto entendí, pero falta confirmar algo antes de guardar:",
+    "",
+    ...entries.map((e, i) =>
+      `${i + 1}. ${isComplete(e) ? "✅" : "❓"} 📅 ${v(e.fecha)} · 🍽️ ${v(e.comida)} · 📍 ${v(e.modo)} · ⭐ ${v(e.calificacion)} · 📝 ${escapeHtml(e.notas) || "—"}`),
     "",
     "❓ <b>Para confirmar:</b>",
-    ...entry.aclaraciones.map((a) => `• ${escapeHtml(a)}`),
+    ...entries.flatMap((e) => e.aclaraciones).map((a) => `• ${escapeHtml(a)}`),
   ];
 }
 
+// "(2/3)" when a message is one of several for the same batch.
+const nth = (i: number, n: number) => (n > 1 ? ` (${i + 1}/${n})` : "");
+
 // Visible (not collapsed) sheet action footer; goes above the collapsed LLM context.
 // LOAD-BEARING FORMAT: parseRow recovers the row from "op · fila N".
-function tech(op: string, row: number): string {
-  return `\nacciones: <code>${op} · fila ${row}</code>`;
+function tech(op: string, row?: number): string {
+  return `\nacciones: <code>${row === undefined ? op : `${op} · fila ${row}`}</code>`;
 }
 
 // --- Cierres de ciclo (recaps) ---
@@ -121,30 +127,36 @@ function parseISO(iso: string): { y: number; m: number; d: number } {
 }
 
 // Inner text echoing the ORIGINAL user message (a transcript for voice, the text otherwise).
-// Always shown so any saved/proposed message can be replied to with full context.
-function mensajeNote(userText: string, voice: boolean): string {
-  return `${voice ? "🎤 transcript" : "💬 mensaje"}: ${escapeHtml(userText)}`;
+// Always shown so any saved/proposed message can be replied to with full context. When the
+// message replies to one of ours, the original is carried over from it plus this latest answer
+// (only the latest), so a chain of clarifications never loses the original batch.
+function mensajeNote(userText: string, voice: boolean, repliedText?: string): string {
+  const flat = (t: string) => escapeHtml(t.replace(/\n\s*\n/g, "\n").trim());
+  const original = repliedText?.match(/(💬 mensaje|🎤 transcript): ([\s\S]*?)(?=\n↩️ respuesta|\n\n|$)/);
+  if (!original) return `${voice ? "🎤 transcript" : "💬 mensaje"}: ${flat(userText)}`;
+  return `${original[1]}: ${escapeHtml(original[2])}\n↩️ respuesta${voice ? " 🎤" : ""}: ${flat(userText)}`;
 }
 
 // Wrap the LLM context bits (transcript + meal table) in one expandable blockquote
 // so they show collapsed by default. Only the "🧩 Contexto del LLM" header shows until
-// expanded. Skips empty parts; returns "" if nothing to show.
+// expanded. Skips empty parts; returns "" if nothing to show. Parts are separated by a blank
+// line, which mensajeNote relies on to find the end of the original message.
 function llmFooter(...parts: string[]): string {
-  const body = parts.filter(Boolean).join("\n");
+  const body = parts.filter(Boolean).join("\n\n");
   if (!body) return "";
   return `\n<blockquote expandable>🧩 Contexto del LLM\n\n\n<code>${body}</code></blockquote>`;
 }
 
-// Proposal buttons. Accept carries the target row; the proposed entry is re-parsed from the
-// message's summary() on accept (stateless). Both edits and collisions are overwrites.
-const proposalKeyboard = (row: number): InlineKeyboard => ({
+// Proposal buttons. The items (entries + target rows) are re-parsed from the message text on
+// accept, so nothing is stored between proposal and accept.
+const proposalKeyboard: InlineKeyboard = {
   inline_keyboard: [
     [
-      { text: "✅ Aceptar", callback_data: `ok:overwrite:${row}` },
+      { text: "✅ Aceptar", callback_data: "ok" },
       { text: "✖️ Rechazar", callback_data: "no" },
     ],
   ],
-});
+};
 
 export function createBot({ llm, store, chat, clock }: BotDeps) {
   async function readContext() {
@@ -193,7 +205,6 @@ export function createBot({ llm, store, chat, clock }: BotDeps) {
       await chat.send(msg.chat.id, "Mandame un texto o una nota de voz describiendo la comida 📝🎤");
       return;
     }
-    const note = mensajeNote(userText, voice);
 
     const dias = await readContext();
     const recientes = formatRecientes(dias);
@@ -204,56 +215,61 @@ export function createBot({ llm, store, chat, clock }: BotDeps) {
     const repliedText = msg.reply_to_message?.text;
     const repliedSaved = repliedText && isSavedMeal(repliedText);
     const repliedRow = repliedSaved ? parseRow(repliedText) : null;
+    const footer = llmFooter(mensajeNote(userText, voice, repliedText), ctx);
 
-    const entry = await llm.extract({ text: userText, now: nowBA(clock.now()), recientes, replied: repliedText ?? "" });
+    const entries = await llm.extract({ text: userText, now: nowBA(clock.now()), recientes, replied: repliedText ?? "" });
 
-    // Incomplete or ambiguous → ask, do NOT save.
-    if (entry.aclaraciones.length > 0 || !entry.comida || !entry.modo || !entry.calificacion) {
-      await chat.send(msg.chat.id, askLines(entry).join("\n") + llmFooter(note, ctx));
+    if (entries.length === 0) {
+      await chat.send(msg.chat.id, `No encontré ninguna comida en el mensaje 🤔${footer}`, { replyTo: msg.message_id });
       return;
     }
 
-    // Locate the row this would touch. A reply targets its exact row (handles a comida change);
-    // otherwise we match the same comida already logged that date. If the model chose "agregar"
-    // we still only treat a same-comida match as a collision (don't redirect a reply's row).
-    const dayEntries = await store.readDay(entry.fecha);
-    const byMatch = dayEntries.find((e) => e.comida === entry.comida);
-    const byReply = repliedRow ? dayEntries.find((e) => e.row === repliedRow) : undefined;
-    const target = entry.accion === "editar" ? (byReply ?? byMatch) : byMatch;
-    validateMealWrite(dias, entry, target?.row);
+    // Any meal incomplete or ambiguous → ask about the whole batch, save NOTHING.
+    if (!entries.every(isComplete)) {
+      await chat.send(msg.chat.id, askLines(entries).join("\n") + footer, { replyTo: msg.message_id });
+      return;
+    }
 
-    // Edit, or a new meal that collides with an existing one → propose an overwrite to
-    // accept/reject (never write silently). Both are "overwrite"; only clean appends auto-save.
-    if (target) {
-      const baseEntry: MealEntry = {
-        fecha: entry.fecha,
-        comida: target.comida,
-        modo: target.modo,
-        calificacion: target.calificacion,
-        notas: target.notas,
-        aclaraciones: [],
-        accion: "editar",
-      };
-      const titulo =
-        entry.accion === "editar"
+    // Locate the row each meal would touch. A reply to a saved meal targets its exact row
+    // (handles a comida change); otherwise we match the same comida already logged that date.
+    // If the model chose "agregar" we still only treat a same-comida match as a collision.
+    const items = entries.map((entry) => {
+      const dayEntries = dias.find((d) => d.fecha === entry.fecha)?.entries ?? [];
+      const byMatch = dayEntries.find((e) => e.comida === entry.comida);
+      const byReply = repliedRow && entries.length === 1 ? dayEntries.find((e) => e.row === repliedRow) : undefined;
+      const target = entry.accion === "editar" ? (byReply ?? byMatch) : byMatch;
+      return { entry, target };
+    });
+    validateBatch(dias, items.map(({ entry, target }) => ({ entry, row: target?.row })));
+
+    // Edits, or new meals that collide with existing ones → propose the whole batch to
+    // accept/reject (never overwrite silently). Only batches of clean appends auto-save.
+    if (items.some((i) => i.target)) {
+      const blocks = items.map(({ entry, target }, i) => {
+        const n = entries.length > 1 ? `${i + 1}. ` : "";
+        if (!target) return `${n}➕ <b>Nueva</b>\n${summary(entry)}${tech("append")}`;
+        const base: MealEntry = { ...entry, comida: target.comida, modo: target.modo, calificacion: target.calificacion, notas: target.notas };
+        const titulo = entry.accion === "editar"
           ? `✏️ <b>Propuesta de edición</b> (fila ${target.row})`
-          : `⚠️ Ya tenías <b>${entry.comida}</b> el ${entry.fecha}. Propuesta de reemplazo:`;
-      await chat.send(
-        msg.chat.id,
-        `${titulo}\n${diff(baseEntry, entry)}\n\n${summary(entry)}${tech("overwrite", target.row)}${llmFooter(note, ctx)}`,
-        { keyboard: proposalKeyboard(target.row), replyTo: msg.message_id },
-      );
+          : `⚠️ Ya tenías <b>${escapeHtml(entry.comida)}</b> el ${entry.fecha} (fila ${target.row})`;
+        return `${n}${titulo}\n${diff(base, entry)}\n\n${summary(entry)}${tech("overwrite", target.row)}`;
+      });
+      await chat.send(msg.chat.id, blocks.join("\n\n") + footer, { keyboard: proposalKeyboard, replyTo: msg.message_id });
       return;
     }
 
-    // No target → save directly (new meals don't need accept/reject).
-    const row = await store.append(entry);
-    await chat.send(msg.chat.id, `✅ <b>Guardado</b>\n${summary(entry)}${tech("append", row)}${llmFooter(note, ctx)}`);
-
-    // Si la Cena cierra el día (y quizá semana/mes), mandar los recaps.
-    if (entry.comida === "Cena") {
-      await sendCierres(msg.chat.id, entry.fecha);
+    // No targets → save directly, one message per meal (each can be replied to for edits).
+    for (const [i, { entry }] of items.entries()) {
+      const row = await store.append(entry);
+      await chat.send(msg.chat.id, `✅ <b>Guardado</b>${nth(i, items.length)}\n${summary(entry)}${tech("append", row)}${footer}`, { replyTo: msg.message_id });
     }
+    await sendCierresFor(msg.chat.id, entries);
+  }
+
+  // Si alguna Cena cierra el día (y quizá semana/mes), mandar los recaps, una vez por fecha.
+  async function sendCierresFor(chatId: number, entries: MealEntry[]): Promise<void> {
+    const fechas = new Set(entries.filter((e) => e.comida === "Cena").map((e) => e.fecha));
+    for (const fecha of fechas) await sendCierres(chatId, fecha);
   }
 
   async function handleCallback(cq: TgCallback): Promise<void> {
@@ -268,24 +284,23 @@ export function createBot({ llm, store, chat, clock }: BotDeps) {
       return;
     }
 
-    // Accept: re-parse the proposed entry from the message's summary() and apply it.
-    if (cq.data?.startsWith("ok:overwrite:")) {
-      const row = Number(cq.data.split(":")[2]);
-      const prop = parseSummary(cq.message.text ?? "");
-      if (!prop) {
+    // Accept: re-parse the items from the message text and apply them in order. "ok:overwrite:N"
+    // is the single-row button of proposals sent before batches; its text parses the same way.
+    if (cq.data === "ok" || cq.data?.startsWith("ok:overwrite:")) {
+      const items: BatchItem[] = parseItems(cq.message.text ?? "");
+      if (items.length === 0) {
         await chat.send(chatId, "❌ No pude leer la propuesta, reenviá la corrección.", { replyTo: messageId });
         return;
       }
       const dias = await readContext();
-      validateMealWrite(dias, prop, row);
-      await store.overwrite(row, prop);
+      validateBatch(dias, items);
       await chat.dropButtons(chatId, messageId);
-      await chat.send(chatId, `✅ <b>Aplicado</b>\n${summary(prop)}${tech("overwrite", row)}`, { replyTo: messageId });
-
-      // Si la edición deja una Cena, recalcular los recaps del ciclo.
-      if (prop.comida === "Cena") {
-        await sendCierres(chatId, prop.fecha);
+      for (const [i, { entry, row }] of items.entries()) {
+        const written = row === undefined ? await store.append(entry) : await store.overwrite(row, entry);
+        const op = row === undefined ? "append" : "overwrite";
+        await chat.send(chatId, `✅ <b>Aplicado</b>${nth(i, items.length)}\n${summary(entry)}${tech(op, written)}`, { replyTo: messageId });
       }
+      await sendCierresFor(chatId, items.map((i) => i.entry));
     }
   }
 

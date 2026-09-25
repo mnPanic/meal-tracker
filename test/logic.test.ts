@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
-  validateMealWrite,
+  validateBatch,
   diff,
   formatRecientes,
   isSavedMeal,
   parseRow,
-  parseSummary,
+  parseItems,
   prevISO,
   summary,
 } from "../src/logic";
@@ -41,11 +41,11 @@ describe("prevISO", () => {
 });
 
 
-describe("summary ⇄ parseSummary round-trip", () => {
+describe("summary ⇄ parseItems round-trip", () => {
   it("recovers the entry from its own summary", () => {
     const e = meal({ comida: "Cena", modo: "Afuera", calificacion: "Bad", notas: "Daiki - sushi" });
-    const parsed = parseSummary(summary(e));
-    expect(parsed).toMatchObject({
+    const [parsed] = parseItems(summary(e));
+    expect(parsed.entry).toMatchObject({
       fecha: e.fecha,
       comida: "Cena",
       modo: "Afuera",
@@ -53,17 +53,28 @@ describe("summary ⇄ parseSummary round-trip", () => {
       notas: "Daiki - sushi",
       accion: "editar",
     });
+    expect(parsed.row).toBeUndefined();
   });
 
   it("does not mistake a diff line for the summary notas", () => {
     const base = meal({ notas: "viejo" });
     const prop = meal({ notas: "nuevo" });
     const text = `✏️ Propuesta\n${diff(base, prop)}\n\n${summary(prop)}`;
-    expect(parseSummary(text)?.notas).toBe("nuevo");
+    expect(parseItems(text).map((i) => i.entry.notas)).toEqual(["nuevo"]);
   });
 
-  it("returns null on unrelated text", () => {
-    expect(parseSummary("hola que tal")).toBeNull();
+  it("reads every item with its action footer, in order", () => {
+    const text = [
+      `1. ⚠️ Ya tenías Desayuno\n${summary(meal({ comida: "Desayuno" }))}\nacciones: overwrite · fila 12`,
+      `2. ➕ Nueva\n${summary(meal({ comida: "Almuerzo", notas: "" }))}\nacciones: append`,
+    ].join("\n\n");
+    expect(parseItems(text).map((i) => [i.entry.comida, i.entry.notas, i.row])).toEqual([
+      ["Desayuno", "", 12], ["Almuerzo", "", undefined],
+    ]);
+  });
+
+  it("returns nothing on unrelated text", () => {
+    expect(parseItems("hola que tal")).toEqual([]);
   });
 });
 
@@ -147,28 +158,48 @@ describe("formatRecientes", () => {
   });
 });
 
-describe("validateMealWrite", () => {
+describe("validateBatch", () => {
   const days = [{ fecha: "2026-06-21", entries: [sheet("Desayuno", { row: 1 }), sheet("Almuerzo", { row: 2 })] }];
+  const one = (entry: ReturnType<typeof meal>, row?: number) => validateBatch(days, [{ entry, row }]);
 
   it("allows skipping Merienda for an explicit Cena", () => {
-    expect(() => validateMealWrite(days, meal({ comida: "Cena" }))).not.toThrow();
+    expect(() => one(meal({ comida: "Cena" }))).not.toThrow();
   });
 
   it("rejects a new meal that skips a mandatory one", () => {
-    expect(() => validateMealWrite([{ ...days[0], entries: [days[0].entries[0]] }], meal({ comida: "Cena" })))
+    expect(() => validateBatch([{ ...days[0], entries: [days[0].entries[0]] }], [{ entry: meal({ comida: "Cena" }) }]))
       .toThrow("Almuerzo del 2026-06-21");
   });
 
   it("rejects renaming Almuerzo to Cena, leaving a hole", () => {
-    expect(() => validateMealWrite(days, meal({ comida: "Cena" }), 2)).toThrow("Almuerzo del 2026-06-21");
+    expect(() => one(meal({ comida: "Cena" }), 2)).toThrow("Almuerzo del 2026-06-21");
     expect(days[0].entries[1].comida).toBe("Almuerzo");
   });
 
   it("allows a correction that keeps the sequence intact", () => {
-    expect(() => validateMealWrite(days, meal({ notas: "corregida" }), 2)).not.toThrow();
+    expect(() => one(meal({ notas: "corregida" }), 2)).not.toThrow();
   });
 
   it("rejects dates outside the validated window", () => {
-    expect(() => validateMealWrite(days, meal({ fecha: "2026-06-22" }))).toThrow("fuera del contexto");
+    expect(() => one(meal({ fecha: "2026-06-22" }))).toThrow("fuera del contexto");
+  });
+
+  it("counts earlier items of the batch as loaded, across days", () => {
+    const window = [{ fecha: "2026-06-21", entries: [sheet("Desayuno", { row: 1 })] }, { fecha: "2026-06-22", entries: [] }];
+    expect(() => validateBatch(window, [
+      { entry: meal({ comida: "Almuerzo" }) },
+      { entry: meal({ comida: "Cena" }) },
+      { entry: meal({ fecha: "2026-06-22", comida: "Desayuno" }) },
+    ])).not.toThrow();
+    expect(window[0].entries).toHaveLength(1);
+  });
+
+  it("rejects appending a meal that is already in the sheet", () => {
+    expect(() => one(meal({ comida: "Almuerzo" }))).toThrow("Ya hay Almuerzo del 2026-06-21");
+  });
+
+  it("rejects the same meal twice in one batch", () => {
+    expect(() => validateBatch(days, [{ entry: meal({ comida: "Cena" }) }, { entry: meal({ comida: "Cena" }) }]))
+      .toThrow("Cena del 2026-06-21 aparece dos veces");
   });
 });

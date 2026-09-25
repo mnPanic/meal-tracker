@@ -46,6 +46,7 @@ export async function transcribe(apiKey: string, audio: ArrayBuffer): Promise<st
 }
 
 const SYSTEM_PROMPT = `Extraés registros de comidas a partir de un mensaje en español argentino.
+Un mensaje puede describir UNA O VARIAS comidas: devolvé un registro por comida en "registros".
 
 PRIORIDAD: lo que dice el usuario sobre fecha, comida, detalles y correcciones SIEMPRE
 prevalece sobre cualquier inferencia del contexto. Nunca reasignes una comida explícita para
@@ -92,6 +93,17 @@ EJEMPLOS:
 - Si ahora es 2026-07-23 02:00, "hoy merendé" es Merienda del 2026-07-22; "ya dormí y desayuné"
   es Desayuno del 2026-07-23. Validá que la carga no deje huecos obligatorios.
 
+VARIAS COMIDAS: si el mensaje describe varias comidas (una por línea o en una misma frase),
+devolvé un registro por cada una, en el orden de la secuencia. Las comidas anteriores del mismo
+mensaje cuentan como ya cargadas para ubicar las siguientes, aunque la tabla todavía no las tenga.
+Cada registro lleva sus propias "aclaraciones": si solo una comida tiene un problema, preguntá en
+ese registro y devolvé igual las demás completas. No dupliques comidas ni inventes comidas que el
+mensaje no menciona. Si el mensaje no describe ninguna comida, devolvé "registros": [].
+Si el usuario responde a una aclaración (te paso ese mensaje, que incluye su mensaje original),
+devolvé TODAS las comidas del mensaje original con las correcciones de la respuesta aplicadas.
+Si responde a UN registro ya guardado, devolvé SOLO ese registro editado, aunque el contexto de
+ese mensaje mencione otras comidas.
+
 ACCIÓN: elegí una de dos y devolvela en "accion":
 - "agregar": es una comida NUEVA, que todavía no figura en las comidas recientes de ese día.
 - "editar": es una corrección o complemento de una comida que YA figura en las comidas recientes
@@ -137,7 +149,7 @@ Ejemplos con fecha/comida resueltas y sin huecos:
 - "el 2/9 almorcé delivery ok, lugar cilantro" → notas "Cilantro", aclaraciones []; no preguntes plato.
 - "casa ok" → modo Casa, calificacion OK, notas "", aclaraciones [].`;
 
-const SCHEMA = {
+const ENTRY_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -156,6 +168,15 @@ const SCHEMA = {
   required: ["fecha", "comida", "modo", "calificacion", "notas", "accion", "aclaraciones"],
 } as const;
 
+const SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    registros: { type: "array", items: ENTRY_SCHEMA, description: "Una entrada por comida descripta, en orden de secuencia; [] si no hay ninguna." },
+  },
+  required: ["registros"],
+} as const;
+
 export function openAiLlm(apiKey: string): Llm {
   return {
     transcribe: (audio) => transcribe(apiKey, audio),
@@ -163,7 +184,7 @@ export function openAiLlm(apiKey: string): Llm {
   };
 }
 
-export async function extract(apiKey: string, { text, now, recientes, replied }: ExtractInput): Promise<MealEntry> {
+export async function extract(apiKey: string, { text, now, recientes, replied }: ExtractInput): Promise<MealEntry[]> {
   const contexto = recientes
     ? `\nComidas recientes (contexto, con modo/calificación/notas):\n${recientes}`
     : "";
@@ -183,11 +204,11 @@ export async function extract(apiKey: string, { text, now, recientes, replied }:
       ],
       response_format: {
         type: "json_schema",
-        json_schema: { name: "meal_entry", strict: true, schema: SCHEMA },
+        json_schema: { name: "meal_entries", strict: true, schema: SCHEMA },
       },
     }),
   });
   if (!r.ok) throw new Error(`extract failed: ${r.status} ${await r.text()}`);
   const j = (await r.json()) as { choices: { message: { content: string } }[] };
-  return JSON.parse(j.choices[0].message.content) as MealEntry;
+  return (JSON.parse(j.choices[0].message.content) as { registros: MealEntry[] }).registros;
 }

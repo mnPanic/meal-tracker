@@ -48,15 +48,30 @@ export function formatRecientes(days: MealDay[]): string {
   return ["| Fecha | Desayuno | Almuerzo | Merienda | Cena |", "| --- | --- | --- | --- | --- |", ...rows].join("\n");
 }
 
-// Validate the resulting sequence, including edits that rename an existing meal.
-export function validateMealWrite(days: MealDay[], entry: MealEntry, row?: number): void {
-  if (!ORDEN.includes(entry.comida)) throw new Error(`Comida inválida: ${entry.comida}`);
-  if (!days.some((day) => day.fecha === entry.fecha)) throw new Error("La fecha está fuera del contexto de 7 días.");
-  const proposed = days.map((day) => ({
-    ...day,
-    entries: day.entries.filter((saved) => row === undefined || saved.row !== row),
-  }));
-  proposed.find((day) => day.fecha === entry.fecha)!.entries.push({ ...entry, row: row ?? -1, score: 0 });
+export interface BatchItem {
+  entry: MealEntry;
+  row?: number; // the row it overwrites; undefined = append
+}
+
+// Validate the sequence that results from applying the items in order, including edits that
+// rename an existing meal. Earlier items count as loaded when placing later ones.
+export function validateBatch(days: MealDay[], items: BatchItem[]): void {
+  const proposed = days.map((day) => ({ ...day, entries: [...day.entries] }));
+  const seen = new Set<string>();
+  for (const { entry, row } of items) {
+    if (!ORDEN.includes(entry.comida)) throw new Error(`Comida inválida: ${entry.comida}`);
+    const day = proposed.find((d) => d.fecha === entry.fecha);
+    if (!day) throw new Error("La fecha está fuera del contexto de 7 días.");
+    const key = `${entry.comida} del ${entry.fecha}`;
+    if (seen.has(key)) throw new Error(`${key} aparece dos veces en el mensaje.`);
+    seen.add(key);
+    if (row !== undefined) {
+      for (const d of proposed) d.entries = d.entries.filter((saved) => saved.row !== row);
+    } else if (day.entries.some((saved) => saved.comida === entry.comida)) {
+      throw new Error(`Ya hay ${key} en la planilla.`);
+    }
+    day.entries.push({ ...entry, row: row ?? -1, score: 0 });
+  }
   formatRecientes(proposed);
 }
 
@@ -64,22 +79,26 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// LOAD-BEARING FORMAT: parseSummary re-parses this exact layout from proposal messages to
-// recover the entry on accept (stateless). Keep fecha/comida/modo/calificacion on line 1 and
-// notas on its own line; don't reorder without updating parseSummary.
-// Returns HTML (escaped); parseSummary reads it back from Telegram's plain text.
+// LOAD-BEARING FORMAT: parseItems re-parses this exact layout from proposal messages to
+// recover the entries on accept (stateless). Keep fecha/comida/modo/calificacion on line 1 and
+// notas on its own line; don't reorder without updating parseItems.
+// Returns HTML (escaped); parseItems reads it back from Telegram's plain text.
 export function summary(entry: MealEntry): string {
   const e = (s: string) => escapeHtml(s);
   return `📅 ${e(entry.fecha)} · 🍽️ ${e(entry.comida)} · 📍 ${e(entry.modo)} · ⭐ ${e(entry.calificacion)}\n📝 ${e(entry.notas)}`;
 }
 
-// Recover the entry from a message built with summary(). Returns null if it doesn't match.
-// The header line and the notas line must be adjacent (summary()'s exact layout), so a diff
-// block above it — whose lines look like "📝 viejo → nuevo" — can't be mistaken for it.
-export function parseSummary(text: string): MealEntry | null {
-  const m = text.match(/📅 (\S+) · 🍽️ (\S+) · 📍 (\S+) · ⭐ (\S+)\n📝 ([^\n]*)/);
-  if (!m) return null;
-  return { fecha: m[1], comida: m[2], modo: m[3], calificacion: m[4], notas: m[5].trim(), aclaraciones: [], accion: "editar" };
+const ITEM = /📅 (\S+) · 🍽️ (\S+) · 📍 (\S+) · ⭐ (\S+)\n📝 ([^\n]*)(?:\nacciones: (append|overwrite)(?: · fila (\d+))?)?/g;
+
+// Recover every summary() in a message (Telegram's plain text), with the "acciones" footer that
+// follows it, if any. The header and notas lines must be adjacent (summary()'s exact layout), so
+// a diff block above it — whose lines look like "📝 viejo → nuevo" — can't be mistaken for it.
+// "overwrite · fila N" → row N; "append" or no footer → a new row.
+export function parseItems(text: string): BatchItem[] {
+  return [...text.matchAll(ITEM)].map((m) => ({
+    entry: { fecha: m[1], comida: m[2], modo: m[3], calificacion: m[4], notas: m[5].trim(), aclaraciones: [], accion: "editar" },
+    row: m[6] === "overwrite" && m[7] ? Number(m[7]) : undefined,
+  }));
 }
 
 // LOAD-BEARING FORMAT: parseRow recovers the row from this footer. Keep "op · fila N".

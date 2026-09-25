@@ -49,23 +49,34 @@ con backoff exponencial hasta 30 segundos y variación aleatoria. Las escrituras
 completo no se reintentan automáticamente. Configuración y diagnóstico en [OPERATIONS.md](OPERATIONS.md).
 
 1. **Mensaje de texto o nota de voz** → la voz se transcribe con `transcribe()`, después
-   `extract()` saca `fecha / comida / modo / calificacion / notas` + una `accion`
-   (`agregar` | `editar`). Ambos caminos comparten el pipeline.
+   `extract()` saca **una o varias comidas** (`fecha / comida / modo / calificacion / notas` + una
+   `accion`: `agregar` | `editar`). Ambos caminos comparten el pipeline. Un mensaje con varias
+   comidas (p. ej. una por línea) se procesa como una **tanda, todo o nada**: se valida la secuencia
+   de la tanda completa, contando las comidas anteriores del mismo mensaje como ya cargadas.
 2. **Datos obligatorios**: pregunta si falta modo o calificación. Lugar, plato y notas son opcionales:
    si no se mencionan, se omiten sin preguntar. Fecha y comida se resuelven con el mensaje y la
    secuencia; una ambigüedad que impida ubicar el registro o un hueco obligatorio bloquea la carga.
-3. **Read-before-write**: lee el día y ubica la fila que tocaría (misma comida, o la fila exacta si
-   el mensaje responde a un registro guardado). Si hay match —edición o colisión con una comida ya
-   cargada— propone un **overwrite** con botones **✅ Aceptar / ✖️ Rechazar** (la fila viaja en el
-   `callback_data` y la propuesta se re-parsea del texto al aceptar, todo stateless). No se agregan
-   duplicados de la misma comida.
-4. **Guarda** → una comida nueva sin colisión se hace `append` directo y responde `✅ Guardado`.
-5. **Editar**: respondés (texto o voz) a un mensaje de comida guardada; ese registro se le pasa al
-   modelo como contexto fuerte y, si decide `editar`, propone el `overwrite` de esa fila (paso 3).
+   Si **alguna** comida de la tanda tiene una duda, no se guarda **ninguna**: el bot responde un
+   solo mensaje con todas (✅/❓) y las preguntas. Respondiendo a ese mensaje se reprocesa la tanda
+   completa: el mensaje original viaja en su contexto, junto con la última respuesta (solo la última).
+3. **Read-before-write**: ubica la fila que tocaría cada comida (misma comida ese día, o la fila
+   exacta si el mensaje responde a un registro guardado). Si alguna tiene match —edición o colisión
+   con una comida ya cargada— propone **toda la tanda** con botones **✅ Aceptar / ✖️ Rechazar**:
+   cada ítem es `➕ Nueva` (`append`) o un reemplazo con su diff (`overwrite · fila N`). Al aceptar
+   se re-parsean los ítems del texto del mensaje y se aplican en orden, todo stateless. No se
+   agregan duplicados de la misma comida.
+4. **Guarda** → si ninguna comida choca, se hace `append` de cada una en orden y responde
+   **un mensaje por comida** (`✅ Guardado (2/3)`), cada uno como reply al mensaje original.
+5. **Editar**: respondés (texto o voz) al mensaje de una comida guardada; ese registro se le pasa
+   al modelo como contexto fuerte y, si decide `editar`, propone el `overwrite` de esa fila (paso 3).
 6. **Cierres de ciclo**: la Cena es el último momento del día. Al guardar una Cena (`append` o
    `overwrite`), el bot manda el **recap del día** (`readDiario`); si esa fecha es domingo, también
    el **semanal** (`readSemanal`); si es el último día del mes, el **mensual** (`readMensual`).
-   Event-driven, sin cron.
+   En una tanda, los recaps salen una vez, al final. Event-driven, sin cron.
+
+Las escrituras de una tanda son un `append`/`overwrite` por comida (el Apps Script no tiene
+escritura atómica de varias filas): si una falla a mitad de camino, las anteriores quedan guardadas
+y el bot muestra el error. Antes de reintentar, revisar la planilla.
 
 Cada respuesta incluye, en un bloque colapsable **🧩 Contexto del LLM**, el mensaje/transcript
 original (`💬`/`🎤`) más una tabla de comidas cargadas, pendientes y meriendas omitidas, para debugging.

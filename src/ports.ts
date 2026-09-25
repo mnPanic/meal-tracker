@@ -13,7 +13,8 @@ export interface ExtractInput {
 
 export interface Llm {
   transcribe(audio: ArrayBuffer): Promise<string>;
-  extract(input: ExtractInput): Promise<MealEntry>;
+  // One entry per meal described in the message, in sequence order.
+  extract(input: ExtractInput): Promise<MealEntry[]>;
 }
 
 export interface MealStore {

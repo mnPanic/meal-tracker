@@ -11,10 +11,11 @@ import type { DiarioRow, PeriodoRow, SheetEntry } from "../../src/sheets";
 export class ScriptedLlm implements Llm {
   readonly calls: ExtractInput[] = [];
   readonly transcripts: string[] = [];
-  private queue: MealEntry[] = [];
+  private queue: MealEntry[][] = [];
 
-  willExtract(entry: MealEntry): this {
-    this.queue.push(entry);
+  // Queues one extract() result: the meals the LLM "understood" from the next message.
+  willExtract(...entries: MealEntry[]): this {
+    this.queue.push(entries);
     return this;
   }
 
@@ -29,7 +30,7 @@ export class ScriptedLlm implements Llm {
     return text;
   }
 
-  async extract(input: ExtractInput): Promise<MealEntry> {
+  async extract(input: ExtractInput): Promise<MealEntry[]> {
     this.calls.push(input);
     const next = this.queue.shift();
     if (!next) throw new Error("ScriptedLlm: unexpected extract call");
