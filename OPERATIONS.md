@@ -65,7 +65,8 @@ npx wrangler tail --format json --search sheets_request_failed
 ```
 
 Cada fallo registra `operation`, `fecha`/`view`/`row` cuando corresponda, `attempt`, `status`,
-`contentType`, `finalHost`, `redirected`, `durationMs`, `timeoutMs`, `retry` y `delayMs`.
+`contentType`, `finalHost`, `redirected`, `durationMs`, `timeoutMs`, `elapsedMs`, `budgetMs`,
+`remainingMs`, `retry` y `delayMs`.
 Si la respuesta no es JSON, `preview` contiene hasta 600 caracteres de texto legible: elimina
 etiquetas, scripts y estilos, decodifica entidades comunes y oculta tokens y URLs. No se registra
 el cuerpo de la petición ni el contenido JSON de comidas. Si no hubo respuesta HTTP, `status`
@@ -73,20 +74,48 @@ queda ausente y `error` indica timeout o fallo de red/lectura del stream. Los ti
 si se estaba esperando la respuesta HTTP o leyendo su cuerpo. `sheets_slow_response` registra
 lecturas/escrituras exitosas de 10 s o más; incluye duración y estado, sin contenido de comidas.
 
-Las lecturas GET hacen hasta **3 intentos**, con timeout de **30 segundos por intento**, pausas de
-500 ms y 1 s más hasta 249 ms aleatorios. Reintentan HTTP 408/429/5xx, fallos de transporte y
-respuestas 2xx que no cumplen el contrato JSON. Respetan `Retry-After`; si pide más de 10 s de
-espera, terminan con error en lugar de reintentar antes de tiempo. HTTP 401/403/404 y errores de
-aplicación `{ok:false}` no se reintentan. `sheets_recovered` confirma una lectura recuperada.
+Cada lectura GET dispone de **hasta 5 minutos en total**, incluyendo solicitudes y pausas.
+`SHEETS_READ_RETRY_MINUTES` en `wrangler.toml` configura ese presupuesto (también se puede
+sobrescribir en `.dev.vars` para pruebas locales). Cada intento tiene un timeout de **hasta 30 s**,
+acortado al tiempo restante. Las pausas crecen **1, 2, 4, 8, 16, 30 s**, con hasta 999 ms de
+variación aleatoria y un máximo de 30 s. No se espera si la lectura responde bien.
+Reintentan HTTP 408/429/5xx, fallos de transporte y respuestas 2xx sin el contrato JSON.
+Respetan `Retry-After`, incluso si excede los 30 s; si la pausa no deja tiempo para otro intento,
+terminan con error. HTTP 401/403/404 y errores de aplicación `{ok:false}` no se reintentan.
+`sheets_recovered` confirma recuperación e incluye `elapsedMs` con el tiempo total de esa lectura.
+El presupuesto es **por lectura**, no por mensaje: el contexto, la lectura previa a escritura y
+los resúmenes pueden acumular más tiempo.
 
 POST (`append`/`overwrite`) usa el mismo diagnóstico, pero **nunca se reintenta automáticamente**:
 la escritura puede haberse completado aunque falle la respuesta. Antes de repetirla, verificar
 la planilla. El cuerpo de una respuesta tiene un límite de 1 MiB.
 
-No filtrar solo por `--status error`: el webhook captura las excepciones y responde HTTP 200,
-por lo que un fallo de Apps Script puede aparecer dentro de una invocación exitosa.
+El webhook confirma HTTP 200 al aceptar el trabajo persistente; los fallos posteriores aparecen
+en el Workflow, no en esa respuesta HTTP. No limitar la búsqueda al evento HTTP del webhook.
 Un HTML/500 que luego desaparece no demuestra un cold start. Correlacionar hora y mensaje con
 **Executions** del Apps Script para distinguir errores del script, cuotas y fallos de Google.
+
+### Procesamiento persistente de Telegram
+
+El deploy configura el Workflow `meal-tracker-processing` (binding `MEAL_WORKFLOW`, clase
+`MealWorkflow`). El webhook espera a que `createBatch` acepte `telegram-<update_id>` y responde
+enseguida; las consultas, OpenAI, escrituras y respuestas de Telegram se ejecutan en el Workflow.
+Los reenvíos del mismo update se omiten mientras la instancia siga retenida por Cloudflare.
+Si falla la aceptación persistente, el webhook devuelve 503 para permitir que Telegram reenvíe.
+
+El paso del Workflow tiene **cero reintentos** y un límite de una hora: solo el cliente de Sheets
+reintenta GET. Esto evita reejecutar todo el mensaje ante un error de escritura o de respuesta.
+Si hay un error, el bot intenta avisarlo en Telegram y la instancia queda fallida.
+No reiniciar manualmente una instancia fallida sin comprobar antes si llegó a guardar la comida.
+`wrangler dev` permite probar el Workflow localmente. El cambio requiere desplegar el Worker;
+no requiere cambios en Apps Script ni volver a registrar el webhook.
+
+Antes de activar en producción, comprobar el plan de Workers: el plan Free limita las
+subrequests externas a 50 por invocación. Las siete lecturas paralelas y sus redirecciones
+pueden consumir ese límite antes de agotar los cinco minutos si los fallos son persistentes.
+Esta implementación no elimina ese límite; para ese caso hace falta un plan con mayor cupo
+o reducir las siete lecturas a una consulta de rango en Apps Script.
+Ver [límites de Workflows](https://developers.cloudflare.com/workflows/reference/limits/).
 
 ### Secrets (Worker)
 

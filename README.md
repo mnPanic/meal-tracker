@@ -2,8 +2,8 @@
 
 Bot de Telegram para registrar comidas en un Google Sheet desde el celular. Mandás un mensaje
 de texto **o una nota de voz** ("almorcé milanesa con ensalada en casa"), el bot lo transcribe y
-estructura con OpenAI y escribe la fila en la planilla. Stateless, uso personal (~10 mensajes/día),
-corre gratis en Cloudflare Workers.
+estructura con OpenAI y escribe la fila en la planilla. Uso personal (~10 mensajes/día),
+corre en Cloudflare Workers con Workflows para procesar mensajes en segundo plano.
 
 ## Arquitectura
 
@@ -16,11 +16,15 @@ graph LR
 
     subgraph CF[☁️ Cloudflare Worker · Hono]
       W[src/index.ts<br/>webhook · orquestación]
+      WF[MealWorkflow<br/>procesamiento persistente]
     end
 
-    TG <-->|webhook POST / sendMessage| W
-    W <-->|transcribe voz · extract → JSON| OAI
-    W <-->|read / append / overwrite / views| AS
+    TG -->|webhook POST| W
+    W -->|acepta update_id · responde 200| TG
+    W -->|createBatch| WF
+    WF -->|sendMessage| TG
+    WF <-->|transcribe voz · extract → JSON| OAI
+    WF <-->|read / append / overwrite / views| AS
     AS <--> SH
 ```
 
@@ -28,7 +32,7 @@ graph LR
 
 | Pieza | Archivo | Rol |
 |---|---|---|
-| Worker / webhook | `src/index.ts` | Recibe updates de Telegram, orquesta el flujo, responde. |
+| Worker / webhook + Workflow | `src/index.ts` | Acepta updates por ID; procesa y responde desde un trabajo persistente. |
 | Lógica pura | `src/logic.ts` | Tabla de contexto, validación de huecos, parse/format de mensajes y diff/summary, testeados en `test/logic.test.ts`. |
 | Telegram | `src/telegram.ts` | Helpers de la Bot API (descarga de archivos para notas de voz). |
 | Transcripción + extracción | `src/openai.ts` | `gpt-4o-mini-transcribe` (voz→texto) + `gpt-5.6-luna` structured outputs → `MealEntry`. |
@@ -36,6 +40,11 @@ graph LR
 | Backend del sheet | `apps-script/Code.gs` | Web app que lee/escribe la planilla. Contrato en `apps-script/README.md`. |
 
 ## Flujo
+
+El webhook acepta cada `update_id` en un Workflow y confirma la recepción inmediatamente.
+Las lecturas de Sheets reintentan errores transitorios durante hasta **5 minutos por lectura**,
+con backoff exponencial hasta 30 segundos y variación aleatoria. Las escrituras y el procesamiento
+completo no se reintentan automáticamente. Configuración y diagnóstico en [OPERATIONS.md](OPERATIONS.md).
 
 1. **Mensaje de texto o nota de voz** → la voz se transcribe con `transcribe()`, después
    `extract()` saca `fecha / comida / modo / calificacion / notas` + una `accion`

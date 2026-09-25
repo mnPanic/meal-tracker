@@ -17,6 +17,7 @@ let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.spyOn(Math, "random").mockReturnValue(0);
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -63,11 +64,13 @@ describe("Apps Script reads", () => {
 
   it("still aborts hung reads, retries within bounds, and reports the timeout phase", async () => {
     useAbortableFetch(60_000);
-    const error = await failure(readDay(client));
-    expect(error).toMatchObject({ message: expect.stringContaining("after 3 attempt(s): request timed out after 30000 ms (waiting for headers)") });
+    const started = Date.now();
+    const error = await failure(readDay({ ...client, readRetryBudgetMs: 65_000 }));
+    expect(Date.now() - started).toBe(65_000);
+    expect(error).toMatchObject({ message: expect.stringContaining("after 3 attempt(s): request timed out after 2000 ms (waiting for headers)") });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(console.error).toHaveBeenCalledWith(expect.objectContaining({
-      timeoutMs: 30_000, durationMs: 30_000, retry: false,
+      timeoutMs: 2_000, durationMs: 2_000, elapsedMs: 65_000, remainingMs: 0, retry: false,
     }));
   });
 
@@ -92,13 +95,19 @@ describe("Apps Script reads", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("stops after three failed attempts and includes the readable upstream message", async () => {
+  it("bounds sustained failures by five minutes and includes the readable upstream message", async () => {
+    const started = Date.now();
     fetchMock.mockImplementation(() => Promise.resolve(html()));
     const error = await failure(readDay(client));
-    expect(error).toMatchObject({ message: expect.stringContaining("after 3 attempt(s): HTTP 500") });
+    expect(error).toMatchObject({ message: expect.stringContaining("HTTP 500") });
     expect(error).toMatchObject({ message: expect.stringContaining("Server error Try again & retry") });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ attempt: 3, retry: false }));
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(3);
+    expect(Date.now() - started).toBeLessThanOrEqual(300_000);
+    expect(Date.now() - started).toBeGreaterThan(270_000);
+    expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ retry: false, budgetMs: 300_000 }));
+    const pauses = vi.mocked(console.warn).mock.calls.map(([log]) => log.delayMs);
+    expect(pauses.slice(0, 7)).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+    expect(Math.max(...pauses)).toBe(30000);
   });
 
   it.each([401, 403, 404])("does not retry HTTP %s", async (status) => {
@@ -116,7 +125,7 @@ describe("Apps Script reads", () => {
   it.each([null, [], "text", {}])("rejects invalid JSON envelopes: %j", async (value) => {
     fetchMock.mockImplementation(() => Promise.resolve(Response.json(value)));
     expect(await failure(readDay(client))).toMatchObject({ message: expect.stringContaining("expected JSON with ok:boolean") });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(3);
   });
 
   it.each([new TypeError("fetch failed with a secret URL"), new DOMException("timeout with a secret URL", "TimeoutError")])(
@@ -140,8 +149,46 @@ describe("Apps Script reads", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("recovers after a minute and more than three attempts", async () => {
+    for (let i = 0; i < 6; i++) fetchMock.mockResolvedValueOnce(html(503));
+    fetchMock.mockResolvedValueOnce(ok());
+    const pending = readDay(client);
+    await vi.advanceTimersByTimeAsync(60_999);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual([]);
+    expect(console.info).toHaveBeenCalledWith(expect.objectContaining({
+      event: "sheets_recovered", attempt: 7, elapsedMs: 61_000,
+    }));
+  });
+
+  it.each(["60", new Date(Date.now() + 60_000).toUTCString()])("honors longer Retry-After: %s", async (retryAfter) => {
+    // Anchor HTTP-date to the fake clock, rounded to seconds.
+    if (retryAfter !== "60") vi.setSystemTime(new Date(Date.parse(retryAfter) - 60_000));
+    fetchMock.mockResolvedValueOnce(html(429, { "retry-after": retryAfter })).mockResolvedValueOnce(ok());
+    const pending = readDay(client);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual([]);
+  });
+
+  it("adds jitter without exceeding the backoff cap", async () => {
+    vi.mocked(Math.random).mockReturnValue(0.999);
+    fetchMock.mockImplementation(() => Promise.resolve(html(503)));
+    await failure(readDay(client));
+    const delays = vi.mocked(console.warn).mock.calls.map(([log]) => log.delayMs);
+    expect(delays.slice(0, 3)).toEqual([1999, 2999, 4999]);
+    expect(Math.max(...delays)).toBe(30_000);
+  });
+
+  it.each([0, -1, NaN, Infinity])("rejects an invalid read budget: %s", async (readRetryBudgetMs) => {
+    await expect(readDay({ ...client, readRetryBudgetMs })).rejects.toThrow("Invalid Sheets retry budget");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("does not retry early when Retry-After exceeds the wait budget", async () => {
-    fetchMock.mockResolvedValueOnce(html(429, { "retry-after": "60" }));
+    fetchMock.mockResolvedValueOnce(html(429, { "retry-after": "301" }));
     await failure(readDay(client));
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -167,6 +214,13 @@ describe("Apps Script reads", () => {
 });
 
 describe("Apps Script writes", () => {
+  it.each(["append", "overwrite"])("never retries %s on timeout, even with a long read budget", async (action) => {
+    fetchMock.mockRejectedValue(new DOMException("expired", "TimeoutError"));
+    await failure(action === "append" ? append(client, meal) : overwrite(client, 12, meal));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ retry: false, budgetMs: 30_000 }));
+  });
+
   it.each(["append", "overwrite"])("never retries %s after HTML 500", async (action) => {
     fetchMock.mockResolvedValueOnce(html());
     await failure(action === "append" ? append(client, meal) : overwrite(client, 12, meal));

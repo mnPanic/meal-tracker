@@ -8,6 +8,7 @@ import type { MealEntry } from "./openai";
 export interface SheetClient {
   url: string;
   secret: string;
+  readRetryBudgetMs?: number;
 }
 
 export interface SheetEntry {
@@ -77,6 +78,7 @@ type WriteBody = { action: string; row?: number } & Record<string, unknown>;
 
 // Valid Apps Script reads have been observed taking over 10 seconds.
 const REQUEST_TIMEOUT_MS = 30_000;
+const READ_RETRY_BUDGET_MS = 5 * 60_000;
 
 async function request<T>(c: SheetClient, params: Record<string, string>, body?: WriteBody): Promise<T> {
   const method = body ? "POST" : "GET";
@@ -86,14 +88,21 @@ async function request<T>(c: SheetClient, params: Record<string, string>, body?:
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   }
   const operation = body?.action ?? params.view ?? "readDay";
-  const attempts = body ? 1 : 3; // POST may have committed even if its response failed.
+  const budgetMs = body ? REQUEST_TIMEOUT_MS : (c.readRetryBudgetMs ?? READ_RETRY_BUDGET_MS);
+  if (!Number.isFinite(budgetMs) || budgetMs <= 0) throw new Error("Invalid Sheets retry budget");
+  const requestStarted = Date.now();
+  const deadline = requestStarted + budgetMs;
   for (let attempt = 1; ; attempt++) {
     const started = Date.now();
+    const timeoutMs = Math.max(1, Math.min(REQUEST_TIMEOUT_MS, deadline - started));
+    if (started >= deadline) throw new SheetsResponseError(
+      `Apps Script ${operation} exhausted its ${budgetMs} ms read budget after ${attempt - 1} attempt(s)`, false,
+    );
     let r: Response | undefined;
     let preview: string | undefined;
     try {
       r = await fetch(url.toString(), {
-        method, redirect: "follow", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        method, redirect: "follow", signal: AbortSignal.timeout(timeoutMs),
         headers: body ? { "content-type": "application/json" } : undefined,
         body: body ? JSON.stringify({ token: c.secret, ...body }) : undefined,
       });
@@ -109,25 +118,30 @@ async function request<T>(c: SheetClient, params: Record<string, string>, body?:
       const durationMs = Date.now() - started;
       if (attempt > 1 || durationMs >= 10_000) console.info({
         event: attempt > 1 ? "sheets_recovered" : "sheets_slow_response",
-        operation, ...params, attempt, status: r.status, durationMs,
+        operation, ...params, attempt, status: r.status, durationMs, elapsedMs: Date.now() - requestStarted,
       });
       return json as T;
     } catch (cause) {
       // Fetch errors can contain the request URL (including the token). Never log them raw.
       const error = cause instanceof SheetsResponseError ? cause : new SheetsResponseError(
         cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError")
-          ? `request timed out after ${REQUEST_TIMEOUT_MS} ms (${r ? "reading body" : "waiting for headers"})`
+          ? `request timed out after ${timeoutMs} ms (${r ? "reading body" : "waiting for headers"})`
           : "network or response stream error", true,
       );
       const retryAfter = r?.headers.get("retry-after");
       const retryAfterMs = retryAfter ? (/^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now()) : 0;
-      const delayMs = Math.max(500 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250), Number.isFinite(retryAfterMs) ? retryAfterMs : 0);
-      const retry = error.retryable && attempt < attempts && delayMs <= 10_000;
+      // Space attempts out: 1, 2, 4, 8, 16, then at most 30 seconds, including jitter.
+      const backoffMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt - 1, 5) + Math.floor(Math.random() * 1000));
+      const delayMs = Math.max(backoffMs, Number.isFinite(retryAfterMs) ? retryAfterMs : 0);
+      const remainingMs = Math.max(0, deadline - Date.now());
+      // POST may have committed even if its response failed. Never replay it.
+      const retry = !body && error.retryable && delayMs < remainingMs;
       const detail = {
         event: "sheets_request_failed", method, operation, ...params, row: body?.row, attempt,
         status: r?.status, contentType: r?.headers.get("content-type"),
         finalHost: r?.url ? new URL(r.url).hostname : undefined, redirected: r?.redirected,
-        durationMs: Date.now() - started, timeoutMs: REQUEST_TIMEOUT_MS,
+        durationMs: Date.now() - started, timeoutMs,
+        elapsedMs: Date.now() - requestStarted, budgetMs, remainingMs,
         error: error.message, preview, retry, delayMs: retry ? delayMs : undefined,
       };
       if (retry) console.warn(detail); else console.error(detail);
