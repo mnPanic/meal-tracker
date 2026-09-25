@@ -35,7 +35,7 @@ graph LR
 | Worker / webhook + Workflow | `src/index.ts` | Acepta updates por ID; procesa y responde desde un trabajo persistente. |
 | Lógica pura | `src/logic.ts` | Tabla de contexto, validación de huecos, parse/format de mensajes y diff/summary, testeados en `test/logic.test.ts`. |
 | Telegram | `src/telegram.ts` | Helpers de la Bot API (descarga de archivos para notas de voz). |
-| Transcripción + extracción | `src/openai.ts` | `gpt-4o-mini-transcribe` (voz→texto) + `gpt-5.6-luna` structured outputs → `MealEntry`. |
+| Transcripción + extracción | `src/openai.ts` | `gpt-transcribe` con keywords (voz→texto) + `gpt-6-luna` structured outputs → `MealEntry`. |
 | Cliente del sheet | `src/sheets.ts` | Llama al Apps Script (read/append/overwrite + views), con token. |
 | Backend del sheet | `apps-script/Code.gs` | Web app que lee/escribe la planilla. Contrato en `apps-script/README.md`. |
 

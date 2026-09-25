@@ -11,12 +11,27 @@ export interface MealEntry {
   aclaraciones: string[];
 }
 
+// Literal terms the transcriber should expect: the fixed vocabulary of the sheet.
+// Add frequent places here (one per line, no "<", ">" or line breaks).
+export const TRANSCRIBE_KEYWORDS = [
+  "Desayuno", "Almuerzo", "Merienda", "Cena",
+  "desayuné", "almorcé", "merendé", "cené",
+  "Casa", "Delivery", "Afuera",
+  "OK", "Mid", "Bad",
+];
+
+const TRANSCRIBE_PROMPT =
+  "Nota de voz en español argentino registrando comidas: cuál comida (desayuno, almuerzo, " +
+  "merienda o cena), dónde (casa, delivery o afuera), calificación nutricional (OK, Mid o Bad) y el plato.";
+
 export async function transcribe(apiKey: string, audio: ArrayBuffer): Promise<string> {
   const form = new FormData();
   // Telegram voice notes are OGG/Opus.
   form.append("file", new Blob([audio], { type: "audio/ogg" }), "note.ogg");
-  form.append("model", "gpt-4o-mini-transcribe");
-  form.append("language", "es");
+  form.append("model", "gpt-transcribe");
+  form.append("languages[]", "es");
+  form.append("prompt", TRANSCRIBE_PROMPT);
+  for (const keyword of TRANSCRIBE_KEYWORDS) form.append("keywords[]", keyword);
 
   const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
@@ -161,7 +176,7 @@ export async function extract(
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       messages: [
         { role: "system", content: system },
         { role: "user", content: userContent },
