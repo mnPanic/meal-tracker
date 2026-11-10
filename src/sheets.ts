@@ -207,6 +207,14 @@ export interface PeriodoRow {
   eventos: string;
 }
 
+// The weekly table also splits the average into weekdays/weekend and counts meals out.
+// Week/wknd are text (e.g. "#DIV/0!") when that part of the week has no meals.
+export interface SemanalRow extends PeriodoRow {
+  week: number | string; // weekday average
+  wknd: number | string; // weekend average
+  afuera: number; // meals eaten "Afuera"
+}
+
 async function getView<T>(c: SheetClient, view: string, last?: number): Promise<T[]> {
   const params: Record<string, string> = { view };
   if (last) params.last = String(last);
@@ -221,8 +229,8 @@ export function readDiario(c: SheetClient, last?: number): Promise<DiarioRow[]> 
 }
 
 // Weekly summary table from "View semanalmensual".
-export function readSemanal(c: SheetClient, last?: number): Promise<PeriodoRow[]> {
-  return getView<PeriodoRow>(c, "semanal", last);
+export function readSemanal(c: SheetClient, last?: number): Promise<SemanalRow[]> {
+  return getView<SemanalRow>(c, "semanal", last);
 }
 
 // Monthly summary table from "View semanalmensual".

@@ -4,7 +4,7 @@
 import { createBot, type TgUpdate } from "../../src/bot";
 import type { MealEntry } from "../../src/openai";
 import type { Chat, Clock, ExtractInput, InlineKeyboard, Llm, MealStore } from "../../src/ports";
-import type { DiarioRow, PeriodoRow, SheetEntry } from "../../src/sheets";
+import type { DiarioRow, PeriodoRow, SemanalRow, SheetEntry } from "../../src/sheets";
 
 // --- Llm: scripted responses, recording every input ---
 
@@ -58,7 +58,7 @@ function shiftISO(fecha: string, days: number): string {
 
 export class FakeStore implements MealStore {
   readonly rows: StoredRow[] = [];
-  semanal: PeriodoRow[] = [];
+  semanal: SemanalRow[] = [];
   mensual: PeriodoRow[] = [];
   readonly writes: { op: "append" | "overwrite"; row: number }[] = [];
   failNextWrite?: Error;
@@ -126,7 +126,7 @@ export class FakeStore implements MealStore {
     return last ? days.slice(-last) : days;
   }
 
-  async readSemanal(last?: number): Promise<PeriodoRow[]> {
+  async readSemanal(last?: number): Promise<SemanalRow[]> {
     return last ? this.semanal.slice(-last) : this.semanal;
   }
 

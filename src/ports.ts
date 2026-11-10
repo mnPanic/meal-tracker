@@ -2,7 +2,7 @@
 // openai.ts (Llm), sheets.ts (MealStore) and telegram.ts (Chat); the fakes in test/support.
 
 import type { MealEntry } from "./openai";
-import type { DiarioRow, PeriodoRow, SheetEntry } from "./sheets";
+import type { DiarioRow, PeriodoRow, SemanalRow, SheetEntry } from "./sheets";
 
 export interface ExtractInput {
   text: string; // the user's message, or the transcript of a voice note
@@ -22,7 +22,7 @@ export interface MealStore {
   append(entry: MealEntry): Promise<number>;
   overwrite(row: number, entry: MealEntry): Promise<number>;
   readDiario(last?: number): Promise<DiarioRow[]>;
-  readSemanal(last?: number): Promise<PeriodoRow[]>;
+  readSemanal(last?: number): Promise<SemanalRow[]>;
   readMensual(last?: number): Promise<PeriodoRow[]>;
 }
 

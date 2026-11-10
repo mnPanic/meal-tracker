@@ -183,7 +183,9 @@ describe("cycle recaps after a Cena", () => {
   it("sends the day and week recaps on a Sunday", async () => {
     const h = harness("2026-09-27T22:00:00-03:00");
     h.store.seed(...upToMerienda("2026-09-27"));
-    h.store.semanal = [{ inicio: "2026-09-21", label: "2026-09 W4", promedio: 4.5, eventos: "" }];
+    h.store.semanal = [{
+      inicio: "2026-09-21", label: "2026-09 W4", promedio: 4.5, eventos: "", week: 4.75, wknd: "#DIV/0!", afuera: 2,
+    }];
     h.llm.willExtract(meal({ fecha: "2026-09-27", comida: "Cena", modo: "Delivery", calificacion: "Mid" }));
 
     await h.send("cené delivery mid");
@@ -193,6 +195,10 @@ describe("cycle recaps after a Cena", () => {
     expect(dia.text).toContain("🌙 Cierre del día 2026-09-27");
     expect(dia.text).toContain("🌆 Cena: Delivery - Mid");
     expect(semana.text).toContain("📊 Cierre semana: 2026-09 W4");
+    expect(semana.text).toContain("💼 Semana: 4.75");
+    expect(semana.text).toContain("🛋️ Finde: —");
+    expect(semana.text).toContain("⭐ Promedio: 4.5");
+    expect(semana.text).toContain("🍴 Comidas afuera: 2");
     expect(h.chat.messages).toHaveLength(3);
   });
 

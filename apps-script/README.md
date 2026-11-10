@@ -77,15 +77,17 @@ GET <url>?view=diario&last=7
 
 GET <url>?view=semanal&last=1
 → { "ok":true, "view":"semanal", "rows":[
-     { "inicio":"2026-06-08", "label":"2026-06 W2", "promedio":3.95, "eventos":"" } ] }
+     { "inicio":"2026-06-08", "label":"2026-06 W2", "promedio":3.95, "eventos":"",
+       "week":4.13, "wknd":4.33, "afuera":4 } ] }
 
 GET <url>?view=mensual&last=1
 → { "ok":true, "view":"mensual", "rows":[
      { "inicio":"2026-06-01", "label":"2026-06", "promedio":4.19, "eventos":"FDE Rosario day 1 · ..." } ] }
 ```
 
-`semanal` reads cols A–D and `mensual` cols F–I of the single "View semanalmensual" tab (two
-side-by-side tables). `score`/`promedio` are the sheet's computed averages — read straight through.
+`semanal` and `mensual` read the two side-by-side tables of the single "View semanal/mensual" tab,
+located by header: each starts at its "Semana" / "Mes" header and runs to the first blank header;
+fields come from the "Label", "Avg" (or "Promedio") and "Eventos" columns within it. `score`/`promedio` are the sheet's computed averages — read straight through.
 
 ## Guarantees
 

@@ -119,21 +119,39 @@ function readDiario_(p) {
   return json_({ ok: true, view: "diario", rows: rows });
 }
 
-// Read one of the two side-by-side tables in "View semanal/mensual".
-// kind "semanal" = cols A-D, "mensual" = cols F-I. Optional ?last=N.
+// Read one of the two side-by-side tables in "View semanal/mensual", located by header name so
+// adding/moving columns in the sheet doesn't shift the fields. The table starts at the "Semana"
+// (semanal) or "Mes" (mensual) header and runs until the first blank header. Optional ?last=N.
 function readPeriodo_(kind, p) {
-  var off = kind === "mensual" ? 5 : 0; // column offset (F is index 5)
   var values = sheetByName_("View semanal/mensual").getDataRange().getValues();
+  var header = values[0].map(function (h) { return String(h).trim(); });
+  var start = header.indexOf(kind === "mensual" ? "Mes" : "Semana");
+  if (start < 0) throw new Error("View semanal/mensual: no encuentro la tabla " + kind);
+  var col = {};
+  for (var c = start; c < header.length && header[c]; c++) col[header[c]] = c;
+  var promedioCol = "Promedio" in col ? col["Promedio"] : col["Avg"];
+  if (!("Label" in col) || promedioCol === undefined || !("Eventos" in col)) {
+    throw new Error("View semanal/mensual: faltan columnas en la tabla " + kind + " (Label, Avg/Promedio, Eventos)");
+  }
+  if (kind === "semanal" && (!("Week" in col) || !("Wknd" in col) || !("# afuera" in col))) {
+    throw new Error("View semanal/mensual: faltan columnas en la tabla semanal (Week, Wknd, # afuera)");
+  }
   var rows = [];
   for (var i = 1; i < values.length; i++) {
     var r = values[i];
-    if (!r[off]) continue; // blank → end/gap of this table
-    rows.push({
-      inicio: fechaStr_(r[off]),     // week-start or month-start date
-      label: r[off + 1] || "",       // e.g. "2026-06 W2" or "2026-06"
-      promedio: r[off + 2],          // average score for the period
-      eventos: r[off + 3] || "",
-    });
+    if (!r[start]) continue; // blank → end/gap of this table
+    var row = {
+      inicio: fechaStr_(r[start]),   // week-start or month-start date
+      label: r[col["Label"]] || "",  // e.g. "2026-06 W2" or "2026-06"
+      promedio: r[promedioCol],      // average score for the period
+      eventos: r[col["Eventos"]] || "",
+    };
+    if (kind === "semanal") {
+      row.week = r[col["Week"]];     // weekday average ("#DIV/0!" if no weekday meals)
+      row.wknd = r[col["Wknd"]];     // weekend average
+      row.afuera = r[col["# afuera"]] || 0;
+    }
+    rows.push(row);
   }
   var last = Number(p.last);
   if (last > 0 && rows.length > last) rows = rows.slice(rows.length - last);

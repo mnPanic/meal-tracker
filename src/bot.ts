@@ -3,7 +3,7 @@
 
 import type { MealEntry } from "./openai";
 import type { Chat, Clock, InlineKeyboard, Llm, MealStore } from "./ports";
-import type { DiarioRow, PeriodoRow } from "./sheets";
+import type { DiarioRow, PeriodoRow, SemanalRow } from "./sheets";
 import {
   validateBatch,
   diff,
@@ -120,6 +120,20 @@ function fmtPeriodo(titulo: string, emoji: string, r: PeriodoRow): string {
   return parts.join("\n");
 }
 
+function fmtSemanal(r: SemanalRow): string {
+  // Week/wknd come as text (e.g. "#DIV/0!") when that part of the week has no meals.
+  const avg = (v: number | string) => (typeof v === "number" ? String(v) : "—");
+  const parts = [
+    `📊 <b>Cierre semana: ${r.label}</b>`,
+    `💼 <b>Semana:</b> ${avg(r.week)}`,
+    `🛋️ <b>Finde:</b> ${avg(r.wknd)}`,
+    `⭐ <b>Promedio:</b> ${avg(r.promedio)}`,
+    `🍴 <b>Comidas afuera:</b> ${r.afuera}`,
+  ];
+  if (r.eventos) parts.push(`🎉 ${r.eventos}`);
+  return parts.join("\n");
+}
+
 // Parse a YYYY-MM-DD into UTC-safe parts (no timezone drift for weekday/last-day math).
 function parseISO(iso: string): { y: number; m: number; d: number } {
   const [y, m, d] = iso.split("-").map(Number);
@@ -179,7 +193,7 @@ export function createBot({ llm, store, chat, clock }: BotDeps) {
     // Semana: si la cena es domingo (getUTCDay() === 0), cierra la semana.
     if (new Date(Date.UTC(y, m - 1, d)).getUTCDay() === 0) {
       const [sem] = await store.readSemanal(1);
-      if (sem) await chat.send(chatId, fmtPeriodo("semana", "📊", sem));
+      if (sem) await chat.send(chatId, fmtSemanal(sem));
     }
 
     // Mes: si es el último día del mes, cierra el mes. Día 0 del mes siguiente = último del actual.
