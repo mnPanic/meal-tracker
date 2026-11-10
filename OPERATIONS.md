@@ -169,11 +169,25 @@ en el editor web:
 
 1. Editar `apps-script/Code.gs` en el repo (fuente de verdad).
 2. Abrir el proyecto (link de arriba) y **pegar el contenido completo** de `Code.gs` en el editor.
-3. **Deploy → Manage deployments → ✏️ (editar el deployment existente) → Version: New version → Deploy.**
-   - Crear *New version* sobre el **mismo deployment** mantiene la **misma URL `/exec`**, así no hay
-     que tocar el secret `SHEETS_WEBAPP_URL`.
+3. **Implementar → Gestionar implementaciones** (en inglés: *Deploy → Manage deployments*):
+   1. Con la implementación **Activa** seleccionada, tocar el **lápiz ✏️ (Editar)** arriba a la derecha.
+   2. En **Versión**, elegir **Versión nueva** (la primera opción del desplegable).
+   3. En **Descripción**, reemplazar el texto por el nombre del cambio (ej. `v1.1 - fix X`).
+   4. **Implementar.**
+   - **Parece que crea algo nuevo pero no:** la implementación pasa a llamarse como la descripción
+     nueva y las anteriores aparecen en *Archivadas*, pero el **ID de implementación y la URL `/exec`
+     no cambian**, así que no hay que tocar el secret `SHEETS_WEBAPP_URL`.
+   - **No usar "Nueva implementación"** para un cambio de código: crea otra implementación con
+     **otra URL**, y el Worker seguiría usando la vieja (con el código viejo). Si pasó por error,
+     archivarla y repetir el paso 3 sobre la original.
    - **Ojo:** guardar (💾) en el editor **no** publica el cambio. La web app sigue sirviendo la
-     última *version* deployada hasta que crees una nueva.
+     última *versión* implementada hasta que crees una nueva.
+   - Para verificar que la URL sirve el código nuevo, pegarle a un endpoint que use el cambio (ver
+     "Probar a mano" abajo), ej. `?view=semanal&last=1`, y revisar la respuesta. Desde el repo,
+     sin imprimir la URL ni el token:
+     ```bash
+     (set -a; source .dev.vars; curl -sL "$SHEETS_WEBAPP_URL?view=semanal&last=1&token=$SHEETS_API_SECRET")
+     ```
 4. Si es la primera vez: **Deploy → New deployment → Web app**, con **Execute as: Me** y
    **Who has access: Anyone** (necesario para que el Worker llame sin login interactivo). Eso da una
    URL nueva → actualizar el secret `SHEETS_WEBAPP_URL` del Worker.
